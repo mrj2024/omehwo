@@ -65,6 +65,14 @@ function emitOnlineCount() {
   io.emit("online-count", io.engine.clientsCount);
 }
 
+function getChatKey(a: string, b: string) {
+  return [a, b].sort().join(":");
+}
+
+function pushNotification(socketId: string, notification: Notification) {
+  io.to(socketId).emit("notification", notification);
+}
+
 function getPublicUser(socketId: string): PublicUser {
   return (
     socketUsers.get(socketId) ?? {
@@ -75,12 +83,89 @@ function getPublicUser(socketId: string): PublicUser {
   );
 }
 
-function getChatKey(a: string, b: string) {
-  return [a, b].sort().join(":");
+async function getProfile(
+  userId: string
+): Promise<(PublicUser & { banned: boolean }) | null> {
+  const { data, error } = await supabaseAdmin
+    .from("profiles")
+    .select("id, username, role, banned")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+
+  return {
+    id: data.id,
+    username: data.username,
+    role: data.role,
+    banned: data.banned,
+  };
 }
 
-function pushNotification(socketId: string, notification: Notification) {
-  io.to(socketId).emit("notification", notification);
+async function createProfileFromAuthUser(userId: string, email: string) {
+  const username = email.split("@")[0] || "user";
+
+  const { data, error } = await supabaseAdmin
+    .from("profiles")
+    .upsert(
+      {
+        id: userId,
+        username,
+        role: "user",
+        banned: false,
+      },
+      {
+        onConflict: "id",
+      }
+    )
+    .select("id, username, role, banned")
+    .single();
+
+  if (error || !data) return null;
+
+  return {
+    id: data.id,
+    username: data.username,
+    role: data.role,
+    banned: data.banned,
+  };
+}
+
+async function getReports(): Promise<Report[]> {
+  const { data, error } = await supabaseAdmin
+    .from("reports")
+    .select(
+      `
+      id,
+      reason,
+      snippet,
+      status,
+      created_at,
+      reporter:reporter_id(id, username, role),
+      reported:reported_id(id, username, role)
+    `
+    )
+    .order("created_at", { ascending: false });
+
+  if (error || !data) return [];
+
+  return data.map((report: any) => ({
+    id: report.id,
+    reason: report.reason,
+    snippet: report.snippet || [],
+    status: report.status,
+    createdAt: report.created_at,
+    reporter: report.reporter ?? {
+      id: "unknown",
+      username: "Unknown",
+      role: "user",
+    },
+    reported: report.reported ?? {
+      id: "unknown",
+      username: "Unknown",
+      role: "user",
+    },
+  }));
 }
 
 function notifyMods(message: string) {
@@ -112,107 +197,48 @@ function disconnectPair(socketId: string) {
   }
 }
 
-async function getProfile(
-  userId: string
-): Promise<(PublicUser & { banned: boolean }) | null> {
-  const { data, error } = await supabaseAdmin
-    .from("profiles")
-    .select("id, username, role, banned")
-    .eq("id", userId)
-    .single();
-
-  if (error || !data) {
-    console.log("GET PROFILE ERROR:", error);
-    return null;
-  }
-
-  return {
-    id: data.id,
-    username: data.username,
-    role: data.role,
-    banned: data.banned,
-  };
-}
-
-async function getReports(): Promise<Report[]> {
-  const { data, error } = await supabaseAdmin
-    .from("reports")
-    .select(
-      `
-      id,
-      reason,
-      snippet,
-      status,
-      created_at,
-      reporter:reporter_id(id, username, role),
-      reported:reported_id(id, username, role)
-    `
-    )
-    .order("created_at", { ascending: false });
-
-  if (error || !data) {
-    console.log("GET REPORTS ERROR:", error);
-    return [];
-  }
-
-  return data.map((report: any) => ({
-    id: report.id,
-    reason: report.reason,
-    snippet: report.snippet || [],
-    status: report.status,
-    createdAt: report.created_at,
-    reporter: report.reporter ?? {
-      id: "unknown",
-      username: "Unknown",
-      role: "user",
-    },
-    reported: report.reported ?? {
-      id: "unknown",
-      username: "Unknown",
-      role: "user",
-    },
-  }));
-}
-
 io.on("connection", (socket: Socket) => {
-  console.log("Connected:", socket.id);
   emitOnlineCount();
 
-  socket.on("supabase-login", async (profile: PublicUser) => {
-    console.log("SUPABASE LOGIN EVENT:", profile);
+  socket.on("auth-login", async (accessToken: string, callback) => {
+    const {
+      data: { user },
+      error,
+    } = await supabaseAdmin.auth.getUser(accessToken);
 
-    const dbProfile = await getProfile(profile.id);
-
-    console.log("DB PROFILE:", dbProfile);
-
-    if (!dbProfile) {
-      pushNotification(socket.id, {
-        id: crypto.randomUUID(),
-        type: "error",
-        message: "Profile not found.",
-        createdAt: new Date().toISOString(),
-      });
+    if (error || !user?.email) {
+      callback({ success: false, error: "Invalid auth token." });
       return;
     }
 
-    if (dbProfile.banned) {
+    let profile = await getProfile(user.id);
+
+    if (!profile) {
+      profile = await createProfileFromAuthUser(user.id, user.email);
+    }
+
+    if (!profile) {
+      callback({ success: false, error: "Could not create profile." });
+      return;
+    }
+
+    if (profile.banned) {
       socket.emit("banned");
+      callback({ success: false, error: "This account is banned." });
       return;
     }
 
-    socketUsers.set(socket.id, {
-      id: dbProfile.id,
-      username: dbProfile.username,
-      role: dbProfile.role,
-    });
+    const publicUser: PublicUser = {
+      id: profile.id,
+      username: profile.username,
+      role: profile.role,
+    };
 
-    console.log("USER STORED IN SOCKET MAP");
+    socketUsers.set(socket.id, publicUser);
 
-    pushNotification(socket.id, {
-      id: crypto.randomUUID(),
-      type: "success",
-      message: `Connected as ${dbProfile.username}`,
-      createdAt: new Date().toISOString(),
+    callback({
+      success: true,
+      user: publicUser,
     });
   });
 

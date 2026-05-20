@@ -25,7 +25,9 @@ import {
   Megaphone,
 } from "lucide-react";
 
-const socket: Socket = io(import.meta.env.VITE_SOCKET_URL);
+const socket: Socket = io(import.meta.env.VITE_SOCKET_URL, {
+  transports: ["websocket", "polling"],
+});
 
 type SearchMode = "chat" | "video";
 type Status = "idle" | "waiting" | "matched";
@@ -95,43 +97,22 @@ export default function App() {
   const typingTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
-    async function initAuth() {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
-      setSession(session);
-
-      if (session?.user) {
-        await loadProfile(session.user.id);
-      }
-    }
-
-    initAuth();
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
-      setSession(newSession);
-
-      if (newSession?.user) {
-        await loadProfile(newSession.user.id);
-      } else {
-        setCurrentUser(null);
+    socket.on("connect", () => {
+      if (session?.access_token) {
+        serverLogin(session.access_token);
       }
     });
 
-    return () => subscription.unsubscribe();
-  }, []);
-
-  useEffect(() => {
     socket.on("online-count", (count: number) => setOnlineCount(count));
 
     socket.on("notification", (notification: Notification) => {
       setNotifications((prev) => [notification, ...prev.slice(0, 4)]);
     });
 
-    socket.on("banned", () => {
+    socket.on("banned", async () => {
+      await supabase.auth.signOut();
+      setCurrentUser(null);
+      setSession(null);
       setStatus("idle");
       setMatchedMode(null);
       setStranger(null);
@@ -197,6 +178,7 @@ export default function App() {
     });
 
     return () => {
+      socket.off("connect");
       socket.off("online-count");
       socket.off("notification");
       socket.off("banned");
@@ -211,66 +193,69 @@ export default function App() {
         window.clearTimeout(typingTimeoutRef.current);
       }
     };
+  }, [session]);
+
+  useEffect(() => {
+    async function initAuth() {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      setSession(session);
+
+      if (session?.access_token) {
+        serverLogin(session.access_token);
+      }
+    }
+
+    initAuth();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+
+      if (newSession?.access_token) {
+        serverLogin(newSession.access_token);
+      } else {
+        setCurrentUser(null);
+      }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView();
   }, [messages, strangerTyping]);
 
-  async function loadProfile(userId: string) {
-  console.log("LOADING PROFILE:", userId);
+  function serverLogin(accessToken: string) {
+    socket.emit(
+      "auth-login",
+      accessToken,
+      (response: { success: boolean; user?: PublicUser; error?: string }) => {
+        if (!response.success || !response.user) {
+          addLocalNotification("error", response.error || "Server login failed.");
+          return;
+        }
 
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("id, username, role, banned")
-    .eq("id", userId)
-    .single();
+        setCurrentUser(response.user);
 
-  console.log("PROFILE DATA:", data);
-  console.log("PROFILE ERROR:", error);
-
-  if (error || !data) {
-    addLocalNotification(
-      "error",
-      error?.message || "Could not load profile."
+        if (response.user.role === "moderator") {
+          loadReports();
+        }
+      }
     );
-
-    return;
   }
-
-  if (data.banned) {
-    await supabase.auth.signOut();
-
-    addLocalNotification(
-      "error",
-      "This account is banned."
-    );
-
-    return;
-  }
-
-  const profile: PublicUser = {
-    id: data.id,
-    username: data.username,
-    role: data.role,
-  };
-
-  console.log("SETTING USER:", profile);
-
-  setCurrentUser(profile);
-
-  console.log("EMITTING SOCKET LOGIN");
-
-  socket.emit("supabase-login", profile);
-
-  if (profile.role === "moderator") {
-    loadReports();
-  }
-}
 
   async function handleAuth() {
+    if (!email.trim() || !password.trim()) {
+      addLocalNotification("error", "Enter an email and password.");
+      return;
+    }
+
     if (authMode === "register") {
-      const { error } = await supabase.auth.signUp({
+      const { data, error } = await supabase.auth.signUp({
         email,
         password,
       });
@@ -280,18 +265,28 @@ export default function App() {
         return;
       }
 
-      addLocalNotification("success", "Account created. You can now log in.");
-      setAuthMode("login");
+      if (data.session?.access_token) {
+        setSession(data.session);
+        serverLogin(data.session.access_token);
+      }
+
+      addLocalNotification("success", "Account created.");
       return;
     }
 
-    const { error } = await supabase.auth.signInWithPassword({
+    const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password,
     });
 
     if (error) {
       addLocalNotification("error", error.message);
+      return;
+    }
+
+    if (data.session?.access_token) {
+      setSession(data.session);
+      serverLogin(data.session.access_token);
     }
   }
 
@@ -400,29 +395,42 @@ export default function App() {
   function loadReports() {
     socket.emit(
       "get-reports",
-      (response: { success: boolean; reports?: Report[] }) => {
-        if (response.success && response.reports) {
-          setReports(response.reports);
+      (response: { success: boolean; reports?: Report[]; error?: string }) => {
+        if (!response.success) {
+          addLocalNotification("error", response.error || "Could not load reports.");
+          return;
         }
+
+        setReports(response.reports || []);
       }
     );
   }
 
   function clearReports() {
-    socket.emit("clear-reports", (response: { success: boolean }) => {
-      if (response.success) {
-        setReports([]);
-        addLocalNotification("success", "Reports cleared.");
+    socket.emit("clear-reports", (response: { success: boolean; error?: string }) => {
+      if (!response.success) {
+        addLocalNotification("error", response.error || "Could not clear reports.");
+        return;
       }
+
+      setReports([]);
+      addLocalNotification("success", "Reports cleared.");
     });
   }
 
   function markReviewed(reportId: string) {
-    socket.emit("mark-report-reviewed", reportId, (response: { success: boolean }) => {
-      if (response.success) {
+    socket.emit(
+      "mark-report-reviewed",
+      reportId,
+      (response: { success: boolean; error?: string }) => {
+        if (!response.success) {
+          addLocalNotification("error", response.error || "Could not review report.");
+          return;
+        }
+
         addLocalNotification("success", "Report marked reviewed.");
       }
-    });
+    );
   }
 
   function moderateUser(targetUserId: string, action: "warn" | "ban", reason: string) {
@@ -445,7 +453,7 @@ export default function App() {
 
   const unreadReports = reports.filter((report) => report.status === "open").length;
 
-  if (!session || !currentUser) {
+  if (!currentUser) {
     return (
       <main className="min-h-screen bg-[#f3f3f3] text-black">
         <NotificationStack notifications={notifications} onClose={removeNotification} />
@@ -491,27 +499,27 @@ export default function App() {
             </div>
 
             <div className="mt-5 space-y-3">
-<input
-  name="email"
-  id="email"
-  type="email"
-  autoComplete="email"
-  value={email}
-  onChange={(e) => setEmail(e.target.value)}
-  placeholder="Email"
-  className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
-/>
+              <input
+                name="email"
+                id="email"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Email"
+                className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
+              />
 
-<input
-  name="password"
-  id="password"
-  type="password"
-  autoComplete="current-password"
-  value={password}
-  onChange={(e) => setPassword(e.target.value)}
-  placeholder="Password"
-  className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
-/>
+              <input
+                name="password"
+                id="password"
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Password"
+                className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
+              />
 
               <button
                 onClick={handleAuth}
