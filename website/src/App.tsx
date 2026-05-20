@@ -3,6 +3,13 @@ import type { Session } from "@supabase/supabase-js";
 import { io, Socket } from "socket.io-client";
 import { supabase } from "./lib/supabase";
 
+import "@livekit/components-styles";
+import {
+  LiveKitRoom,
+  VideoConference,
+  RoomAudioRenderer,
+} from "@livekit/components-react";
+
 import {
   MessageCircle,
   Video,
@@ -22,9 +29,6 @@ import {
   CheckCircle,
   Ban,
   Megaphone,
-  Mic,
-  MicOff,
-  VideoOff,
   Tags,
 } from "lucide-react";
 
@@ -71,99 +75,41 @@ type Notification = {
   createdAt: string;
 };
 
-const rtcConfig: RTCConfiguration = {
-  iceServers: [
-    {
-      urls: [
-        "stun:stun.l.google.com:19302",
-        "stun:stun1.l.google.com:19302",
-      ],
-    },
-  ],
-};
-
 export default function App() {
   const [, setSession] = useState<Session | null>(null);
+  const [currentUser, setCurrentUser] = useState<PublicUser | null>(null);
 
-  const [currentUser, setCurrentUser] =
-    useState<PublicUser | null>(null);
-
-  const [authMode, setAuthMode] =
-    useState<"login" | "register">("login");
-
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  const [status, setStatus] =
-    useState<Status>("idle");
+  const [status, setStatus] = useState<Status>("idle");
+  const [, setMode] = useState<SearchMode>("chat");
+  const [matchedMode, setMatchedMode] = useState<SearchMode | null>(null);
 
-  const [, setMode] =
-    useState<SearchMode>("chat");
-
-  const [matchedMode, setMatchedMode] =
-    useState<SearchMode | null>(null);
-
-  const [, setStranger] =
-    useState<PublicUser | null>(null);
-
-  const [messages, setMessages] =
-    useState<Message[]>([]);
-
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
 
-  const [onlineCount, setOnlineCount] =
-    useState(0);
+  const [onlineCount, setOnlineCount] = useState(0);
+  const [strangerTyping, setStrangerTyping] = useState(false);
 
-  const [strangerTyping, setStrangerTyping] =
-    useState(false);
+  const [interestInput, setInterestInput] = useState("");
+  const [, setInterests] = useState<string[]>([]);
+  const [sharedInterests, setSharedInterests] = useState<string[]>([]);
 
-  const [interestInput, setInterestInput] =
-    useState("");
+  const [reportReason, setReportReason] = useState("");
+  const [reportStatus, setReportStatus] = useState("");
 
-  const [, setInterests] =
-    useState<string[]>([]);
+  const [showModPanel, setShowModPanel] = useState(false);
+  const [reports, setReports] = useState<Report[]>([]);
+  const [expandedReportId, setExpandedReportId] = useState<string | null>(null);
 
-  const [sharedInterests, setSharedInterests] =
-    useState<string[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
 
-  const [reportReason, setReportReason] =
-    useState("");
+  const [livekitToken, setLivekitToken] = useState<string | null>(null);
+  const [livekitRoom, setLivekitRoom] = useState<string | null>(null);
 
-  const [reportStatus, setReportStatus] =
-    useState("");
-
-  const [showModPanel, setShowModPanel] =
-    useState(false);
-
-  const [reports, setReports] =
-    useState<Report[]>([]);
-
-  const [expandedReportId, setExpandedReportId] =
-    useState<string | null>(null);
-
-  const [notifications, setNotifications] =
-    useState<Notification[]>([]);
-
-  const [cameraEnabled, setCameraEnabled] =
-    useState(true);
-
-  const [micEnabled, setMicEnabled] =
-    useState(true);
-
-  const localVideoRef =
-    useRef<HTMLVideoElement | null>(null);
-
-  const remoteVideoRef =
-    useRef<HTMLVideoElement | null>(null);
-
-  const localStreamRef =
-    useRef<MediaStream | null>(null);
-
-  const peerRef =
-    useRef<RTCPeerConnection | null>(null);
-
-  const bottomRef =
-    useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     async function initAuth() {
@@ -205,13 +151,12 @@ export default function App() {
     socket.on("banned", async () => {
       await supabase.auth.signOut();
 
-      cleanupVideo();
-
       setCurrentUser(null);
       setSession(null);
       setStatus("idle");
       setMatchedMode(null);
-      setStranger(null);
+      setLivekitToken(null);
+      setLivekitRoom(null);
 
       setMessages([
         {
@@ -224,26 +169,30 @@ export default function App() {
     socket.on("waiting", ({ mode }: { mode: SearchMode }) => {
       setStatus("waiting");
       setMatchedMode(mode);
-      setStranger(null);
+      setLivekitToken(null);
+      setLivekitRoom(null);
     });
 
     socket.on(
       "match-found",
-      async ({
+      ({
         mode,
         stranger,
         interests,
-        initiator,
+        livekitToken,
+        livekitRoom,
       }: {
         mode: SearchMode;
         stranger: PublicUser;
         interests: string[];
-        initiator: boolean;
+        livekitToken?: string | null;
+        livekitRoom?: string | null;
       }) => {
         setStatus("matched");
         setMatchedMode(mode);
-        setStranger(stranger);
         setSharedInterests(interests || []);
+        setLivekitToken(livekitToken || null);
+        setLivekitRoom(livekitRoom || null);
 
         setMessages([
           {
@@ -251,10 +200,6 @@ export default function App() {
             text: `You're now chatting with ${stranger.username}.`,
           },
         ]);
-
-        if (mode === "video") {
-          await startVideo(initiator);
-        }
       }
     );
 
@@ -283,11 +228,10 @@ export default function App() {
     });
 
     socket.on("partner-left", () => {
-      cleanupVideo();
-
       setStatus("idle");
       setMatchedMode(null);
-      setStranger(null);
+      setLivekitToken(null);
+      setLivekitRoom(null);
 
       setMessages((prev) => [
         ...prev,
@@ -302,46 +246,16 @@ export default function App() {
       setReports(updatedReports);
     });
 
-    socket.on("webrtc-offer", async (offer) => {
-      if (!peerRef.current) {
-        await createPeer(false);
-      }
-
-      const peer = peerRef.current;
-
-      if (!peer) return;
-
-      await peer.setRemoteDescription(
-        new RTCSessionDescription(offer)
-      );
-
-      const answer = await peer.createAnswer();
-
-      await peer.setLocalDescription(answer);
-
-      socket.emit("webrtc-answer", answer);
-    });
-
-    socket.on("webrtc-answer", async (answer) => {
-      if (!peerRef.current) return;
-
-      await peerRef.current.setRemoteDescription(
-        new RTCSessionDescription(answer)
-      );
-    });
-
-    socket.on("webrtc-ice-candidate", async (candidate) => {
-      if (!peerRef.current) return;
-
-      try {
-        await peerRef.current.addIceCandidate(candidate);
-      } catch (err) {
-        console.error(err);
-      }
-    });
-
     return () => {
-      socket.off();
+      socket.off("online-count");
+      socket.off("notification");
+      socket.off("banned");
+      socket.off("waiting");
+      socket.off("match-found");
+      socket.off("receive-message");
+      socket.off("stranger-typing");
+      socket.off("partner-left");
+      socket.off("reports-updated");
     };
   }, []);
 
@@ -361,11 +275,7 @@ export default function App() {
         }
       ) => {
         if (!response.success || !response.user) {
-          addNotification(
-            "error",
-            response.error || "Server login failed."
-          );
-
+          addNotification("error", response.error || "Server login failed.");
           return;
         }
 
@@ -395,15 +305,13 @@ export default function App() {
       }
 
       addNotification("success", "Account created.");
-
       return;
     }
 
-    const { data, error } =
-      await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
 
     if (error) {
       addNotification("error", error.message);
@@ -416,8 +324,6 @@ export default function App() {
   }
 
   async function logout() {
-    cleanupVideo();
-
     socket.emit("logout");
 
     await supabase.auth.signOut();
@@ -426,15 +332,13 @@ export default function App() {
     setSession(null);
     setStatus("idle");
     setMessages([]);
-    setStranger(null);
     setShowModPanel(false);
     setReports([]);
+    setLivekitToken(null);
+    setLivekitRoom(null);
   }
 
-  function addNotification(
-    type: Notification["type"],
-    message: string
-  ) {
+  function addNotification(type: Notification["type"], message: string) {
     setNotifications((prev) => [
       {
         id: crypto.randomUUID(),
@@ -447,17 +351,13 @@ export default function App() {
   }
 
   function removeNotification(id: string) {
-    setNotifications((prev) =>
-      prev.filter((item) => item.id !== id)
-    );
+    setNotifications((prev) => prev.filter((item) => item.id !== id));
   }
 
   function parseInterests() {
     return interestInput
       .split(",")
-      .map((interest) =>
-        interest.trim().toLowerCase()
-      )
+      .map((interest) => interest.trim().toLowerCase())
       .filter(Boolean)
       .slice(0, 8);
   }
@@ -466,13 +366,13 @@ export default function App() {
     const parsedInterests = parseInterests();
 
     setInterests(parsedInterests);
-
     setMode(selectedMode);
     setMatchedMode(selectedMode);
 
     setMessages([]);
-    setStranger(null);
     setSharedInterests([]);
+    setLivekitToken(null);
+    setLivekitRoom(null);
 
     socket.emit("find-match", {
       mode: selectedMode,
@@ -481,20 +381,17 @@ export default function App() {
   }
 
   function stopChat() {
-    cleanupVideo();
-
     socket.emit("next");
 
     setStatus("idle");
     setMatchedMode(null);
     setMessages([]);
-    setStranger(null);
     setSharedInterests([]);
+    setLivekitToken(null);
+    setLivekitRoom(null);
   }
 
-  function sendMessage(
-    e: React.FormEvent<HTMLFormElement>
-  ) {
+  function sendMessage(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
     const trimmed = input.trim();
@@ -515,128 +412,12 @@ export default function App() {
     setInput("");
   }
 
-  function handleInputChange(
-    e: React.ChangeEvent<HTMLInputElement>
-  ) {
+  function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
     setInput(e.target.value);
 
     if (status === "matched") {
       socket.emit("typing");
     }
-  }
-
-  async function createPeer(initiator: boolean) {
-    const peer = new RTCPeerConnection(rtcConfig);
-
-    peerRef.current = peer;
-
-    if (localStreamRef.current) {
-      localStreamRef.current
-        .getTracks()
-        .forEach((track) => {
-          peer.addTrack(
-            track,
-            localStreamRef.current as MediaStream
-          );
-        });
-    }
-
-    peer.ontrack = (event) => {
-      const [stream] = event.streams;
-
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
-      }
-    };
-
-    peer.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit(
-          "webrtc-ice-candidate",
-          event.candidate
-        );
-      }
-    };
-
-    if (initiator) {
-      const offer = await peer.createOffer();
-
-      await peer.setLocalDescription(offer);
-
-      socket.emit("webrtc-offer", offer);
-    }
-  }
-
-  async function startVideo(initiator: boolean) {
-    try {
-      const stream =
-        await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true,
-        });
-
-      localStreamRef.current = stream;
-
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
-
-      await createPeer(initiator);
-    } catch {
-      addNotification(
-        "error",
-        "Could not access camera/microphone."
-      );
-    }
-  }
-
-  function cleanupVideo() {
-    if (peerRef.current) {
-      peerRef.current.close();
-      peerRef.current = null;
-    }
-
-    if (localStreamRef.current) {
-      localStreamRef.current
-        .getTracks()
-        .forEach((track) => track.stop());
-
-      localStreamRef.current = null;
-    }
-
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = null;
-    }
-
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.srcObject = null;
-    }
-  }
-
-  function toggleCamera() {
-    const stream = localStreamRef.current;
-    if (!stream) return;
-
-    const videoTrack = stream.getVideoTracks()[0];
-
-    if (!videoTrack) return;
-
-    videoTrack.enabled = !videoTrack.enabled;
-
-    setCameraEnabled(videoTrack.enabled);
-  }
-
-  function toggleMic() {
-    const stream = localStreamRef.current;
-    if (!stream) return;
-
-    const audioTrack = stream.getAudioTracks()[0];
-
-    if (!audioTrack) return;
-
-    audioTrack.enabled = !audioTrack.enabled;
-
-    setMicEnabled(audioTrack.enabled);
   }
 
   function submitReport() {
@@ -650,25 +431,15 @@ export default function App() {
     socket.emit(
       "submit-report",
       reason,
-      (response: {
-        success: boolean;
-        error?: string;
-      }) => {
+      (response: { success: boolean; error?: string }) => {
         if (!response.success) {
-          setReportStatus(
-            response.error || "Could not submit report."
-          );
-
+          setReportStatus(response.error || "Could not submit report.");
           return;
         }
 
         setReportReason("");
         setReportStatus("Report submitted.");
-
-        addNotification(
-          "success",
-          "Report submitted."
-        );
+        addNotification("success", "Report submitted.");
       }
     );
   }
@@ -684,11 +455,7 @@ export default function App() {
         }
       ) => {
         if (!response.success) {
-          addNotification(
-            "error",
-            response.error || "Could not load reports."
-          );
-
+          addNotification("error", response.error || "Could not load reports.");
           return;
         }
 
@@ -700,27 +467,14 @@ export default function App() {
   function clearReports() {
     socket.emit(
       "clear-reports",
-      (
-        response: {
-          success: boolean;
-          error?: string;
-        }
-      ) => {
+      (response: { success: boolean; error?: string }) => {
         if (!response.success) {
-          addNotification(
-            "error",
-            response.error || "Could not clear reports."
-          );
-
+          addNotification("error", response.error || "Could not clear reports.");
           return;
         }
 
         setReports([]);
-
-        addNotification(
-          "success",
-          "Reports cleared."
-        );
+        addNotification("success", "Reports cleared.");
       }
     );
   }
@@ -729,25 +483,13 @@ export default function App() {
     socket.emit(
       "mark-report-reviewed",
       reportId,
-      (
-        response: {
-          success: boolean;
-          error?: string;
-        }
-      ) => {
+      (response: { success: boolean; error?: string }) => {
         if (!response.success) {
-          addNotification(
-            "error",
-            response.error || "Could not review report."
-          );
-
+          addNotification("error", response.error || "Could not review report.");
           return;
         }
 
-        addNotification(
-          "success",
-          "Report reviewed."
-        );
+        addNotification("success", "Report reviewed.");
       }
     );
   }
@@ -764,26 +506,15 @@ export default function App() {
         action,
         reason,
       },
-      (
-        response: {
-          success: boolean;
-          error?: string;
-        }
-      ) => {
+      (response: { success: boolean; error?: string }) => {
         if (!response.success) {
-          addNotification(
-            "error",
-            response.error || "Action failed."
-          );
-
+          addNotification("error", response.error || "Action failed.");
           return;
         }
 
         addNotification(
           "success",
-          action === "ban"
-            ? "User banned."
-            : "User warned."
+          action === "ban" ? "User banned." : "User warned."
         );
       }
     );
@@ -805,9 +536,7 @@ export default function App() {
             <button
               onClick={() => setAuthMode("login")}
               className={`flex-1 py-2 rounded font-bold ${
-                authMode === "login"
-                  ? "bg-blue-600 text-white"
-                  : "border"
+                authMode === "login" ? "bg-blue-600 text-white" : "border"
               }`}
             >
               Login
@@ -816,9 +545,7 @@ export default function App() {
             <button
               onClick={() => setAuthMode("register")}
               className={`flex-1 py-2 rounded font-bold ${
-                authMode === "register"
-                  ? "bg-orange-500 text-white"
-                  : "border"
+                authMode === "register" ? "bg-orange-500 text-white" : "border"
               }`}
             >
               Register
@@ -829,9 +556,7 @@ export default function App() {
             <input
               type="email"
               value={email}
-              onChange={(e) =>
-                setEmail(e.target.value)
-              }
+              onChange={(e) => setEmail(e.target.value)}
               placeholder="Email"
               className="w-full border px-3 py-2"
             />
@@ -839,9 +564,7 @@ export default function App() {
             <input
               type="password"
               value={password}
-              onChange={(e) =>
-                setPassword(e.target.value)
-              }
+              onChange={(e) => setPassword(e.target.value)}
               placeholder="Password"
               className="w-full border px-3 py-2"
             />
@@ -850,9 +573,7 @@ export default function App() {
               onClick={handleAuth}
               className="w-full bg-blue-600 text-white font-bold py-2 rounded"
             >
-              {authMode === "login"
-                ? "Login"
-                : "Create Account"}
+              {authMode === "login" ? "Login" : "Create Account"}
             </button>
           </div>
         </div>
@@ -879,17 +600,10 @@ export default function App() {
             <div className="flex items-center gap-2">
               {currentUser.role === "moderator" && (
                 <button
-                  onClick={() =>
-                    setShowModPanel(
-                      (prev) => !prev
-                    )
-                  }
+                  onClick={() => setShowModPanel((prev) => !prev)}
                   className="relative bg-blue-600 text-white px-3 py-2 rounded font-bold"
                 >
-                  <ShieldCheck
-                    size={16}
-                    className="inline mr-1"
-                  />
+                  <ShieldCheck size={16} className="inline mr-1" />
                   Mod Panel
 
                   {unreadReports > 0 && (
@@ -903,16 +617,10 @@ export default function App() {
               <div className="bg-white border rounded px-3 py-2 flex items-center gap-2">
                 <User size={18} />
 
-                <span className="font-bold">
-                  {currentUser.username}
-                </span>
+                <span className="font-bold">{currentUser.username}</span>
 
-                {currentUser.role ===
-                  "moderator" && (
-                  <ShieldCheck
-                    size={18}
-                    className="text-blue-600"
-                  />
+                {currentUser.role === "moderator" && (
+                  <ShieldCheck size={18} className="text-blue-600" />
                 )}
 
                 <button
@@ -936,11 +644,7 @@ export default function App() {
 
               <input
                 value={interestInput}
-                onChange={(e) =>
-                  setInterestInput(
-                    e.target.value
-                  )
-                }
+                onChange={(e) => setInterestInput(e.target.value)}
                 placeholder="gaming, music, football..."
                 className="w-full border px-3 py-2"
               />
@@ -948,9 +652,7 @@ export default function App() {
 
             <div className="flex gap-2">
               <button
-                onClick={() =>
-                  startSearch("chat")
-                }
+                onClick={() => startSearch("chat")}
                 className="bg-blue-600 text-white px-4 py-2 rounded font-bold flex items-center gap-2"
               >
                 <MessageCircle size={18} />
@@ -958,9 +660,7 @@ export default function App() {
               </button>
 
               <button
-                onClick={() =>
-                  startSearch("video")
-                }
+                onClick={() => startSearch("video")}
                 className="bg-orange-500 text-white px-4 py-2 rounded font-bold flex items-center gap-2"
               >
                 <Video size={18} />
@@ -979,81 +679,44 @@ export default function App() {
 
           {sharedInterests.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
-              {sharedInterests.map(
-                (interest) => (
-                  <span
-                    key={interest}
-                    className="bg-blue-100 text-blue-700 px-3 py-1 rounded-full text-sm font-bold"
-                  >
-                    #{interest}
-                  </span>
-                )
-              )}
+              {sharedInterests.map((interest) => (
+                <span
+                  key={interest}
+                  className="bg-blue-100 text-blue-700 px-3 py-1 rounded-full text-sm font-bold"
+                >
+                  #{interest}
+                </span>
+              ))}
             </div>
           )}
         </section>
 
-        {matchedMode === "video" && (
-          <section className="mb-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-black rounded overflow-hidden relative aspect-video">
-              <video
-                ref={localVideoRef}
-                autoPlay
-                muted
-                playsInline
-                className="w-full h-full object-cover"
-              />
-
-              <div className="absolute bottom-3 left-3 flex gap-2">
-                <button
-                  onClick={toggleMic}
-                  className="bg-white/80 rounded-full p-2"
-                >
-                  {micEnabled ? (
-                    <Mic size={18} />
-                  ) : (
-                    <MicOff size={18} />
-                  )}
-                </button>
-
-                <button
-                  onClick={toggleCamera}
-                  className="bg-white/80 rounded-full p-2"
-                >
-                  {cameraEnabled ? (
-                    <Video size={18} />
-                  ) : (
-                    <VideoOff size={18} />
-                  )}
-                </button>
-              </div>
-            </div>
-
-            <div className="bg-black rounded overflow-hidden aspect-video">
-              <video
-                ref={remoteVideoRef}
-                autoPlay
-                playsInline
-                className="w-full h-full object-cover"
-              />
-            </div>
+        {matchedMode === "video" && livekitToken && livekitRoom && (
+          <section className="mb-4 rounded border bg-white p-2">
+            <LiveKitRoom
+              token={livekitToken}
+              serverUrl={import.meta.env.VITE_LIVEKIT_URL}
+              connect={true}
+              video={true}
+              audio={true}
+              data-lk-theme="default"
+              className="min-h-[420px]"
+            >
+              <VideoConference />
+              <RoomAudioRenderer />
+            </LiveKitRoom>
           </section>
         )}
 
         <section className="bg-white border rounded shadow-sm">
           <div className="h-[420px] overflow-y-auto p-3">
             {status === "idle" && (
-              <p className="text-gray-500">
-                Start chatting with a stranger.
-              </p>
+              <p className="text-gray-500">Start chatting with a stranger.</p>
             )}
 
             {status === "waiting" && (
               <p className="font-bold text-blue-600 flex items-center gap-2">
-                <Search
-                  size={18}
-                  className="animate-pulse"
-                />
+                <Search size={18} className="animate-pulse" />
                 Looking for someone...
               </p>
             )}
@@ -1062,18 +725,13 @@ export default function App() {
               {messages.map((msg, index) => {
                 if (msg.from === "system") {
                   return (
-                    <p
-                      key={index}
-                      className="font-bold text-blue-600"
-                    >
+                    <p key={index} className="font-bold text-blue-600">
                       {msg.text}
                     </p>
                   );
                 }
 
-                const isModerator =
-                  msg.user?.role ===
-                  "moderator";
+                const isModerator = msg.user?.role === "moderator";
 
                 return (
                   <p key={index}>
@@ -1117,11 +775,7 @@ export default function App() {
               <div className="flex gap-2">
                 <input
                   value={reportReason}
-                  onChange={(e) =>
-                    setReportReason(
-                      e.target.value
-                    )
-                  }
+                  onChange={(e) => setReportReason(e.target.value)}
                   placeholder="Report reason..."
                   className="flex-1 border px-3 py-2"
                 />
@@ -1130,20 +784,14 @@ export default function App() {
                   onClick={submitReport}
                   className="bg-red-600 text-white px-4 py-2 rounded font-bold"
                 >
-                  <Flag
-                    size={16}
-                    className="inline mr-1"
-                  />
+                  <Flag size={16} className="inline mr-1" />
                   Report
                 </button>
               </div>
 
               {reportStatus && (
                 <p className="mt-1 text-red-700 text-sm font-bold">
-                  <AlertTriangle
-                    size={14}
-                    className="inline mr-1"
-                  />
+                  <AlertTriangle size={14} className="inline mr-1" />
                   {reportStatus}
                 </p>
               )}
@@ -1173,197 +821,132 @@ export default function App() {
           </form>
         </section>
 
-        {showModPanel &&
-          currentUser.role ===
-            "moderator" && (
-            <section className="mt-4 bg-white border border-blue-300 rounded p-4">
-              <div className="flex justify-between items-center mb-3">
-                <h2 className="font-bold text-xl text-blue-700">
-                  Moderator Panel
-                </h2>
+        {showModPanel && currentUser.role === "moderator" && (
+          <section className="mt-4 bg-white border border-blue-300 rounded p-4">
+            <div className="flex justify-between items-center mb-3">
+              <h2 className="font-bold text-xl text-blue-700">
+                Moderator Panel
+              </h2>
 
-                <button
-                  onClick={clearReports}
-                  className="border px-3 py-2 rounded text-sm"
-                >
-                  <Trash2
-                    size={16}
-                    className="inline mr-1"
-                  />
-                  Clear Reports
-                </button>
-              </div>
+              <button
+                onClick={clearReports}
+                className="border px-3 py-2 rounded text-sm"
+              >
+                <Trash2 size={16} className="inline mr-1" />
+                Clear Reports
+              </button>
+            </div>
 
-              <div className="space-y-2">
-                {reports.map((report) => {
-                  const expanded =
-                    expandedReportId ===
-                    report.id;
+            <div className="space-y-2">
+              {reports.map((report) => {
+                const expanded = expandedReportId === report.id;
 
-                  return (
-                    <div
-                      key={report.id}
-                      className="border rounded p-3 bg-gray-50"
-                    >
-                      <div className="flex flex-col gap-2 md:flex-row md:justify-between">
-                        <div>
-                          <p className="font-bold text-red-600">
-                            Reported:{" "}
-                            {
-                              report.reported
-                                .username
-                            }
-                          </p>
+                return (
+                  <div key={report.id} className="border rounded p-3 bg-gray-50">
+                    <div className="flex flex-col gap-2 md:flex-row md:justify-between">
+                      <div>
+                        <p className="font-bold text-red-600">
+                          Reported: {report.reported.username}
+                        </p>
 
-                          <p>
-                            Reporter:{" "}
-                            {
-                              report.reporter
-                                .username
-                            }
-                          </p>
+                        <p>Reporter: {report.reporter.username}</p>
 
-                          <p className="mt-1">
-                            <span className="font-bold">
-                              Reason:
-                            </span>{" "}
-                            {report.reason}
-                          </p>
-                        </div>
-
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() =>
-                              setExpandedReportId(
-                                expanded
-                                  ? null
-                                  : report.id
-                              )
-                            }
-                            className="border px-3 py-1 rounded"
-                          >
-                            <Eye
-                              size={15}
-                              className="inline mr-1"
-                            />
-                            Snippet
-                          </button>
-
-                          <button
-                            onClick={() =>
-                              markReviewed(
-                                report.id
-                              )
-                            }
-                            className="bg-green-600 text-white px-3 py-1 rounded"
-                          >
-                            <CheckCircle
-                              size={15}
-                              className="inline mr-1"
-                            />
-                            Reviewed
-                          </button>
-
-                          <button
-                            onClick={() =>
-                              moderateUser(
-                                report.reported
-                                  .id,
-                                "warn",
-                                report.reason
-                              )
-                            }
-                            className="bg-yellow-500 text-white px-3 py-1 rounded"
-                          >
-                            <Megaphone
-                              size={15}
-                              className="inline mr-1"
-                            />
-                            Warn
-                          </button>
-
-                          <button
-                            onClick={() =>
-                              moderateUser(
-                                report.reported
-                                  .id,
-                                "ban",
-                                report.reason
-                              )
-                            }
-                            className="bg-red-600 text-white px-3 py-1 rounded"
-                          >
-                            <Ban
-                              size={15}
-                              className="inline mr-1"
-                            />
-                            Ban
-                          </button>
-                        </div>
+                        <p className="mt-1">
+                          <span className="font-bold">Reason:</span>{" "}
+                          {report.reason}
+                        </p>
                       </div>
 
-                      {expanded && (
-                        <div className="mt-3 bg-white border rounded p-3">
-                          <p className="font-bold mb-2">
-                            Chat Snippet
-                          </p>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={() =>
+                            setExpandedReportId(expanded ? null : report.id)
+                          }
+                          className="border px-3 py-1 rounded"
+                        >
+                          <Eye size={15} className="inline mr-1" />
+                          Snippet
+                        </button>
 
-                          {report.snippet.map(
-                            (
-                              msg,
-                              index
-                            ) => (
-                              <p
-                                key={index}
-                              >
-                                <span className="font-bold">
-                                  {
-                                    msg.from
-                                      .username
-                                  }
-                                  :
-                                </span>{" "}
-                                {msg.text}
-                              </p>
+                        <button
+                          onClick={() => markReviewed(report.id)}
+                          className="bg-green-600 text-white px-3 py-1 rounded"
+                        >
+                          <CheckCircle size={15} className="inline mr-1" />
+                          Reviewed
+                        </button>
+
+                        <button
+                          onClick={() =>
+                            moderateUser(
+                              report.reported.id,
+                              "warn",
+                              report.reason
                             )
-                          )}
-                        </div>
-                      )}
+                          }
+                          className="bg-yellow-500 text-white px-3 py-1 rounded"
+                        >
+                          <Megaphone size={15} className="inline mr-1" />
+                          Warn
+                        </button>
+
+                        <button
+                          onClick={() =>
+                            moderateUser(
+                              report.reported.id,
+                              "ban",
+                              report.reason
+                            )
+                          }
+                          className="bg-red-600 text-white px-3 py-1 rounded"
+                        >
+                          <Ban size={15} className="inline mr-1" />
+                          Ban
+                        </button>
+                      </div>
                     </div>
-                  );
-                })}
-              </div>
-            </section>
-          )}
+
+                    {expanded && (
+                      <div className="mt-3 bg-white border rounded p-3">
+                        <p className="font-bold mb-2">Chat Snippet</p>
+
+                        {report.snippet.map((msg, index) => (
+                          <p key={index}>
+                            <span className="font-bold">
+                              {msg.from.username}:
+                            </span>{" "}
+                            {msg.text}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         <div className="fixed right-4 top-4 space-y-2 z-50">
-          {notifications.map(
-            (notification) => (
-              <div
-                key={notification.id}
-                className="bg-white border rounded shadow-lg px-4 py-3 min-w-[280px]"
-              >
-                <div className="flex justify-between gap-3">
-                  <div>
-                    <p className="font-bold text-sm flex items-center gap-2">
-                      <Bell size={15} />
-                      {notification.message}
-                    </p>
-                  </div>
-
-                  <button
-                    onClick={() =>
-                      removeNotification(
-                        notification.id
-                      )
-                    }
-                  >
-                    <X size={15} />
-                  </button>
+          {notifications.map((notification) => (
+            <div
+              key={notification.id}
+              className="bg-white border rounded shadow-lg px-4 py-3 min-w-[280px]"
+            >
+              <div className="flex justify-between gap-3">
+                <div>
+                  <p className="font-bold text-sm flex items-center gap-2">
+                    <Bell size={15} />
+                    {notification.message}
+                  </p>
                 </div>
+
+                <button onClick={() => removeNotification(notification.id)}>
+                  <X size={15} />
+                </button>
               </div>
-            )
-          )}
+            </div>
+          ))}
         </div>
       </div>
     </main>
