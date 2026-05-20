@@ -1,7 +1,9 @@
+import "dotenv/config";
 import express from "express";
 import http from "http";
 import cors from "cors";
 import { Server, Socket } from "socket.io";
+import { supabaseAdmin } from "./supabase";
 
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 const PORT = Number(process.env.PORT) || 3001;
@@ -13,11 +15,6 @@ type PublicUser = {
   id: string;
   username: string;
   role: Role;
-};
-
-type Account = PublicUser & {
-  password: string;
-  banned: boolean;
 };
 
 type ChatMessage = {
@@ -43,14 +40,8 @@ type Notification = {
   createdAt: string;
 };
 
-const accounts: Account[] = [
-  { id: "1", username: "mod", password: "mod123", role: "moderator", banned: false },
-  { id: "2", username: "user", password: "user123", role: "user", banned: false },
-];
-
 const socketUsers = new Map<string, PublicUser>();
 const partners = new Map<string, string>();
-const reports: Report[] = [];
 const chatLogs = new Map<string, ChatMessage[]>();
 
 const waitingUsers = new Map<SearchMode, string | null>([
@@ -111,7 +102,6 @@ function disconnectPair(socketId: string) {
   if (partnerId) {
     partners.delete(socketId);
     partners.delete(partnerId);
-
     io.to(partnerId).emit("partner-left");
   }
 
@@ -122,79 +112,94 @@ function disconnectPair(socketId: string) {
   }
 }
 
+async function getProfile(userId: string): Promise<(PublicUser & { banned: boolean }) | null> {
+  const { data, error } = await supabaseAdmin
+    .from("profiles")
+    .select("id, username, role, banned")
+    .eq("id", userId)
+    .single();
+
+  if (error || !data) return null;
+
+  return {
+    id: data.id,
+    username: data.username,
+    role: data.role,
+    banned: data.banned,
+  };
+}
+
+async function getReports(): Promise<Report[]> {
+  const { data, error } = await supabaseAdmin
+    .from("reports")
+    .select(
+      `
+      id,
+      reason,
+      snippet,
+      status,
+      created_at,
+      reporter:reporter_id(id, username, role),
+      reported:reported_id(id, username, role)
+    `
+    )
+    .order("created_at", { ascending: false });
+
+  if (error || !data) return [];
+
+  return data.map((report: any) => ({
+    id: report.id,
+    reason: report.reason,
+    snippet: report.snippet || [],
+    status: report.status,
+    createdAt: report.created_at,
+    reporter: report.reporter ?? {
+      id: "unknown",
+      username: "Unknown",
+      role: "user",
+    },
+    reported: report.reported ?? {
+      id: "unknown",
+      username: "Unknown",
+      role: "user",
+    },
+  }));
+}
+
 io.on("connection", (socket: Socket) => {
   console.log("Connected:", socket.id);
   emitOnlineCount();
 
-  socket.on("login", (data, callback) => {
-    const username = String(data.username || "").trim();
-    const password = String(data.password || "").trim();
+  socket.on("supabase-login", async (profile: PublicUser) => {
+    const dbProfile = await getProfile(profile.id);
 
-    const account = accounts.find(
-      (acc) =>
-        acc.username.toLowerCase() === username.toLowerCase() &&
-        acc.password === password
-    );
-
-    if (!account) {
-      callback({ success: false, error: "Invalid username or password." });
-      return;
-    }
-
-    if (account.banned) {
-      callback({ success: false, error: "This account is banned." });
-      return;
-    }
-
-    const user: PublicUser = {
-      id: account.id,
-      username: account.username,
-      role: account.role,
-    };
-
-    socketUsers.set(socket.id, user);
-    callback({ success: true, user });
-  });
-
-  socket.on("register", (data, callback) => {
-    const username = String(data.username || "").trim();
-    const password = String(data.password || "").trim();
-
-    if (username.length < 3 || password.length < 4) {
-      callback({
-        success: false,
-        error: "Username must be 3+ characters and password 4+ characters.",
+    if (!dbProfile) {
+      pushNotification(socket.id, {
+        id: crypto.randomUUID(),
+        type: "error",
+        message: "Profile not found.",
+        createdAt: new Date().toISOString(),
       });
       return;
     }
 
-    const exists = accounts.some(
-      (acc) => acc.username.toLowerCase() === username.toLowerCase()
-    );
-
-    if (exists) {
-      callback({ success: false, error: "Username already exists." });
+    if (dbProfile.banned) {
+      socket.emit("banned");
       return;
     }
 
-    const account: Account = {
+    socketUsers.set(socket.id, {
+      id: dbProfile.id,
+      username: dbProfile.username,
+      role: dbProfile.role,
+    });
+
+    pushNotification(socket.id, {
       id: crypto.randomUUID(),
-      username,
-      password,
-      role: "user",
-      banned: false,
-    };
-
-    accounts.push(account);
-
-    const user: PublicUser = {
-      id: account.id,
-      username: account.username,
-      role: account.role,
-    };
-
-    socketUsers.set(socket.id, user);
-    callback({ success: true, user });
+      type: "success",
+      message: `Connected as ${dbProfile.username}`,
+      createdAt: new Date().toISOString(),
+    });
   });
 
   socket.on("logout", () => {
@@ -202,11 +207,11 @@ io.on("connection", (socket: Socket) => {
     socketUsers.delete(socket.id);
   });
 
-  socket.on("find-match", (mode: SearchMode = "chat") => {
+  socket.on("find-match", async (mode: SearchMode = "chat") => {
     const user = socketUsers.get(socket.id);
 
     if (!user) {
-      socket.emit("notification", {
+      pushNotification(socket.id, {
         id: crypto.randomUUID(),
         type: "error",
         message: "You must be logged in.",
@@ -215,9 +220,9 @@ io.on("connection", (socket: Socket) => {
       return;
     }
 
-    const account = accounts.find((acc) => acc.id === user.id);
+    const profile = await getProfile(user.id);
 
-    if (account?.banned) {
+    if (!profile || profile.banned) {
       socket.emit("banned");
       return;
     }
@@ -284,7 +289,7 @@ io.on("connection", (socket: Socket) => {
     io.to(partnerId).emit("stranger-typing");
   });
 
-  socket.on("submit-report", (reason: string, callback) => {
+  socket.on("submit-report", async (reason: string, callback) => {
     const partnerId = partners.get(socket.id);
 
     if (!partnerId) {
@@ -292,39 +297,47 @@ io.on("connection", (socket: Socket) => {
       return;
     }
 
+    const reporter = getPublicUser(socket.id);
+    const reported = getPublicUser(partnerId);
+
     const key = getChatKey(socket.id, partnerId);
     const snippet = chatLogs.get(key)?.slice(-10) || [];
 
-    const report: Report = {
-      id: crypto.randomUUID(),
-      reporter: getPublicUser(socket.id),
-      reported: getPublicUser(partnerId),
+    const { error } = await supabaseAdmin.from("reports").insert({
+      reporter_id: reporter.id,
+      reported_id: reported.id,
       reason: String(reason || "No reason provided").trim(),
       snippet,
       status: "open",
-      createdAt: new Date().toISOString(),
-    };
+    });
 
-    reports.unshift(report);
+    if (error) {
+      callback?.({ success: false, error: "Could not save report." });
+      return;
+    }
+
+    const reports = await getReports();
 
     io.emit("reports-updated", reports);
-    notifyMods(`New report against ${report.reported.username}`);
+    notifyMods(`New report against ${reported.username}`);
 
     callback?.({ success: true });
   });
 
-  socket.on("get-reports", (callback) => {
+  socket.on("get-reports", async (callback) => {
     const user = socketUsers.get(socket.id);
 
     if (user?.role !== "moderator") {
       callback({ success: false, error: "Moderator only." });
       return;
     }
+
+    const reports = await getReports();
 
     callback({ success: true, reports });
   });
 
-  socket.on("mark-report-reviewed", (reportId: string, callback) => {
+  socket.on("mark-report-reviewed", async (reportId: string, callback) => {
     const user = socketUsers.get(socket.id);
 
     if (user?.role !== "moderator") {
@@ -332,17 +345,23 @@ io.on("connection", (socket: Socket) => {
       return;
     }
 
-    const report = reports.find((item) => item.id === reportId);
+    const { error } = await supabaseAdmin
+      .from("reports")
+      .update({ status: "reviewed" })
+      .eq("id", reportId);
 
-    if (report) {
-      report.status = "reviewed";
+    if (error) {
+      callback({ success: false, error: "Could not update report." });
+      return;
     }
+
+    const reports = await getReports();
 
     io.emit("reports-updated", reports);
     callback({ success: true });
   });
 
-  socket.on("clear-reports", (callback) => {
+  socket.on("clear-reports", async (callback) => {
     const user = socketUsers.get(socket.id);
 
     if (user?.role !== "moderator") {
@@ -350,14 +369,23 @@ io.on("connection", (socket: Socket) => {
       return;
     }
 
-    reports.length = 0;
-    io.emit("reports-updated", reports);
+    const { error } = await supabaseAdmin
+      .from("reports")
+      .delete()
+      .neq("id", "00000000-0000-0000-0000-000000000000");
+
+    if (error) {
+      callback({ success: false, error: "Could not clear reports." });
+      return;
+    }
+
+    io.emit("reports-updated", []);
     callback({ success: true });
   });
 
   socket.on(
     "moderation-action",
-    (
+    async (
       data: {
         targetUserId: string;
         action: "warn" | "ban";
@@ -372,21 +400,39 @@ io.on("connection", (socket: Socket) => {
         return;
       }
 
-      const targetAccount = accounts.find((acc) => acc.id === data.targetUserId);
+      const targetProfile = await getProfile(data.targetUserId);
 
-      if (!targetAccount) {
+      if (!targetProfile) {
         callback({ success: false, error: "User not found." });
         return;
       }
 
-      if (targetAccount.role === "moderator") {
-        callback({ success: false, error: "You cannot action another moderator." });
+      if (targetProfile.role === "moderator") {
+        callback({
+          success: false,
+          error: "You cannot action another moderator.",
+        });
         return;
       }
 
       if (data.action === "ban") {
-        targetAccount.banned = true;
+        const { error } = await supabaseAdmin
+          .from("profiles")
+          .update({ banned: true })
+          .eq("id", data.targetUserId);
+
+        if (error) {
+          callback({ success: false, error: "Could not ban user." });
+          return;
+        }
       }
+
+      await supabaseAdmin.from("moderation_actions").insert({
+        moderator_id: moderator.id,
+        target_id: data.targetUserId,
+        action: data.action,
+        reason: data.reason,
+      });
 
       for (const [targetSocketId, user] of socketUsers.entries()) {
         if (user.id === data.targetUserId) {
@@ -408,9 +454,9 @@ io.on("connection", (socket: Socket) => {
       }
 
       notifyMods(
-        `${moderator.username} ${data.action === "ban" ? "banned" : "warned"} ${
-          targetAccount.username
-        }`
+        `${moderator.username} ${
+          data.action === "ban" ? "banned" : "warned"
+        } ${targetProfile.username}`
       );
 
       callback({ success: true });

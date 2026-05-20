@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import { io, Socket } from "socket.io-client";
+import { supabase } from "./lib/supabase";
 import {
   MessageCircle,
   Video,
@@ -65,6 +67,12 @@ type Notification = {
 };
 
 export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [currentUser, setCurrentUser] = useState<PublicUser | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
   const [status, setStatus] = useState<Status>("idle");
   const [mode, setMode] = useState<SearchMode>("chat");
   const [matchedMode, setMatchedMode] = useState<SearchMode | null>(null);
@@ -72,15 +80,8 @@ export default function App() {
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-
   const [onlineCount, setOnlineCount] = useState(0);
   const [strangerTyping, setStrangerTyping] = useState(false);
-
-  const [currentUser, setCurrentUser] = useState<PublicUser | null>(null);
-  const [authMode, setAuthMode] = useState<"login" | "register">("login");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [authError, setAuthError] = useState("");
 
   const [reportReason, setReportReason] = useState("");
   const [reportStatus, setReportStatus] = useState("");
@@ -88,16 +89,43 @@ export default function App() {
   const [showModPanel, setShowModPanel] = useState(false);
   const [reports, setReports] = useState<Report[]>([]);
   const [expandedReportId, setExpandedReportId] = useState<string | null>(null);
-
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const typingTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
-    socket.on("online-count", (count: number) => {
-      setOnlineCount(count);
+    async function initAuth() {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      setSession(session);
+
+      if (session?.user) {
+        await loadProfile(session.user.id);
+      }
+    }
+
+    initAuth();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
+      setSession(newSession);
+
+      if (newSession?.user) {
+        await loadProfile(newSession.user.id);
+      } else {
+        setCurrentUser(null);
+      }
     });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    socket.on("online-count", (count: number) => setOnlineCount(count));
 
     socket.on("notification", (notification: Notification) => {
       setNotifications((prev) => [notification, ...prev.slice(0, 4)]);
@@ -107,12 +135,7 @@ export default function App() {
       setStatus("idle");
       setMatchedMode(null);
       setStranger(null);
-      setMessages([
-        {
-          from: "system",
-          text: "You were banned by a moderator.",
-        },
-      ]);
+      setMessages([{ from: "system", text: "You were banned by a moderator." }]);
     });
 
     socket.on("waiting", ({ mode }: { mode: SearchMode }) => {
@@ -129,7 +152,6 @@ export default function App() {
         setStranger(stranger);
         setReportStatus("");
         setReportReason("");
-
         setMessages([
           {
             from: "system",
@@ -141,14 +163,9 @@ export default function App() {
 
     socket.on("receive-message", (payload: { text: string; user: PublicUser }) => {
       setStrangerTyping(false);
-
       setMessages((prev) => [
         ...prev,
-        {
-          from: "stranger",
-          text: payload.text,
-          user: payload.user,
-        },
+        { from: "stranger", text: payload.text, user: payload.user },
       ]);
     });
 
@@ -169,13 +186,9 @@ export default function App() {
       setMatchedMode(null);
       setStranger(null);
       setStrangerTyping(false);
-
       setMessages((prev) => [
         ...prev,
-        {
-          from: "system",
-          text: "Stranger disconnected.",
-        },
+        { from: "system", text: "Stranger disconnected." },
       ]);
     });
 
@@ -204,6 +217,79 @@ export default function App() {
     bottomRef.current?.scrollIntoView();
   }, [messages, strangerTyping]);
 
+  async function loadProfile(userId: string) {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, username, role, banned")
+      .eq("id", userId)
+      .single();
+
+    if (error || !data) {
+      addLocalNotification("error", "Could not load profile.");
+      return;
+    }
+
+    if (data.banned) {
+      await supabase.auth.signOut();
+      addLocalNotification("error", "This account is banned.");
+      return;
+    }
+
+    const profile: PublicUser = {
+      id: data.id,
+      username: data.username,
+      role: data.role,
+    };
+
+    setCurrentUser(profile);
+
+    socket.emit("supabase-login", profile);
+
+    if (profile.role === "moderator") {
+      loadReports();
+    }
+  }
+
+  async function handleAuth() {
+    if (authMode === "register") {
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+      });
+
+      if (error) {
+        addLocalNotification("error", error.message);
+        return;
+      }
+
+      addLocalNotification("success", "Account created. You can now log in.");
+      setAuthMode("login");
+      return;
+    }
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error) {
+      addLocalNotification("error", error.message);
+    }
+  }
+
+  async function logout() {
+    socket.emit("logout");
+    await supabase.auth.signOut();
+
+    setCurrentUser(null);
+    setSession(null);
+    setStatus("idle");
+    setMessages([]);
+    setStranger(null);
+    setShowModPanel(false);
+    setReports([]);
+  }
+
   function addLocalNotification(type: Notification["type"], message: string) {
     setNotifications((prev) => [
       {
@@ -220,40 +306,6 @@ export default function App() {
     setNotifications((prev) => prev.filter((item) => item.id !== id));
   }
 
-  function handleAuth() {
-    setAuthError("");
-
-    socket.emit(
-      authMode,
-      { username, password },
-      (response: { success: boolean; user?: PublicUser; error?: string }) => {
-        if (!response.success) {
-          setAuthError(response.error || "Something went wrong.");
-          return;
-        }
-
-        if (response.user) {
-          setCurrentUser(response.user);
-          addLocalNotification("success", `Logged in as ${response.user.username}`);
-
-          if (response.user.role === "moderator") {
-            loadReports();
-          }
-        }
-      }
-    );
-  }
-
-  function logout() {
-    socket.emit("logout");
-    setCurrentUser(null);
-    setStatus("idle");
-    setMessages([]);
-    setStranger(null);
-    setShowModPanel(false);
-    setReports([]);
-  }
-
   function startSearch(selectedMode: SearchMode) {
     setMode(selectedMode);
     setMatchedMode(selectedMode);
@@ -268,7 +320,6 @@ export default function App() {
 
   function stopChat() {
     socket.emit("next");
-
     setStatus("idle");
     setMatchedMode(null);
     setMessages([]);
@@ -280,7 +331,6 @@ export default function App() {
     e.preventDefault();
 
     const trimmed = input.trim();
-
     if (!trimmed || status !== "matched") return;
 
     socket.emit("send-message", trimmed);
@@ -332,7 +382,7 @@ export default function App() {
   function loadReports() {
     socket.emit(
       "get-reports",
-      (response: { success: boolean; reports?: Report[]; error?: string }) => {
+      (response: { success: boolean; reports?: Report[] }) => {
         if (response.success && response.reports) {
           setReports(response.reports);
         }
@@ -357,18 +407,10 @@ export default function App() {
     });
   }
 
-  function moderateUser(
-    targetUserId: string,
-    action: "warn" | "ban",
-    reason: string
-  ) {
+  function moderateUser(targetUserId: string, action: "warn" | "ban", reason: string) {
     socket.emit(
       "moderation-action",
-      {
-        targetUserId,
-        action,
-        reason,
-      },
+      { targetUserId, action, reason },
       (response: { success: boolean; error?: string }) => {
         if (!response.success) {
           addLocalNotification("error", response.error || "Action failed.");
@@ -385,13 +427,10 @@ export default function App() {
 
   const unreadReports = reports.filter((report) => report.status === "open").length;
 
-  if (!currentUser) {
+  if (!session || !currentUser) {
     return (
       <main className="min-h-screen bg-[#f3f3f3] text-black">
-        <NotificationStack
-          notifications={notifications}
-          onClose={removeNotification}
-        />
+        <NotificationStack notifications={notifications} onClose={removeNotification} />
 
         <div className="mx-auto flex min-h-screen max-w-md items-center justify-center px-4">
           <section className="w-full rounded border border-gray-300 bg-white p-6 shadow-sm">
@@ -399,7 +438,9 @@ export default function App() {
               Ome<span className="text-orange-500">Clone</span>
             </h1>
 
-            <p className="mt-1 text-sm text-gray-600">Talk to strangers!</p>
+            <p className="mt-1 text-sm text-gray-600">
+              Sign in with Supabase Auth.
+            </p>
 
             <div className="mt-6 flex gap-2">
               <button
@@ -433,9 +474,10 @@ export default function App() {
 
             <div className="mt-5 space-y-3">
               <input
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="Username"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Email"
                 className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
               />
 
@@ -447,22 +489,12 @@ export default function App() {
                 className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
               />
 
-              {authError && (
-                <p className="text-sm font-bold text-red-600">{authError}</p>
-              )}
-
               <button
                 onClick={handleAuth}
                 className="w-full rounded bg-blue-600 py-2 font-bold text-white hover:bg-blue-700"
               >
                 {authMode === "login" ? "Login" : "Create Account"}
               </button>
-            </div>
-
-            <div className="mt-6 rounded border border-gray-300 bg-gray-100 p-3 text-sm">
-              <p className="font-bold">Demo accounts:</p>
-              <p className="mt-1">mod / mod123</p>
-              <p>user / user123</p>
             </div>
           </section>
         </div>
@@ -472,10 +504,7 @@ export default function App() {
 
   return (
     <main className="min-h-screen bg-[#f3f3f3] text-black">
-      <NotificationStack
-        notifications={notifications}
-        onClose={removeNotification}
-      />
+      <NotificationStack notifications={notifications} onClose={removeNotification} />
 
       <div className="mx-auto max-w-5xl px-4 py-4">
         <header className="mb-4 border-b border-gray-300 pb-3">
@@ -512,7 +541,6 @@ export default function App() {
 
               <div className="flex items-center gap-3 rounded border border-gray-300 bg-white px-3 py-2 shadow-sm">
                 <User size={18} className="text-gray-500" />
-
                 <span className="font-bold">{currentUser.username}</span>
 
                 {currentUser.role === "moderator" && (
@@ -555,23 +583,17 @@ export default function App() {
                   const expanded = expandedReportId === report.id;
 
                   return (
-                    <div
-                      key={report.id}
-                      className="rounded border border-gray-300 bg-gray-50 p-3 text-sm"
-                    >
+                    <div key={report.id} className="rounded border border-gray-300 bg-gray-50 p-3 text-sm">
                       <div className="flex flex-col justify-between gap-2 sm:flex-row">
                         <div>
                           <p className="font-bold text-red-600">
                             Reported: {report.reported.username}
                           </p>
-
                           <p>Reporter: {report.reporter.username}</p>
-
                           <p className="mt-1">
                             <span className="font-bold">Reason:</span>{" "}
                             {report.reason}
                           </p>
-
                           <p className="mt-1 text-xs text-gray-500">
                             {new Date(report.createdAt).toLocaleString()} •{" "}
                             {report.status}
@@ -580,9 +602,7 @@ export default function App() {
 
                         <div className="flex flex-wrap gap-2">
                           <button
-                            onClick={() =>
-                              setExpandedReportId(expanded ? null : report.id)
-                            }
+                            onClick={() => setExpandedReportId(expanded ? null : report.id)}
                             className="flex items-center gap-1 rounded border border-gray-400 bg-white px-3 py-1 font-bold hover:bg-gray-100"
                           >
                             <Eye size={15} />
@@ -598,9 +618,7 @@ export default function App() {
                           </button>
 
                           <button
-                            onClick={() =>
-                              moderateUser(report.reported.id, "warn", report.reason)
-                            }
+                            onClick={() => moderateUser(report.reported.id, "warn", report.reason)}
                             className="flex items-center gap-1 rounded bg-yellow-500 px-3 py-1 font-bold text-white hover:bg-yellow-600"
                           >
                             <Megaphone size={15} />
@@ -608,9 +626,7 @@ export default function App() {
                           </button>
 
                           <button
-                            onClick={() =>
-                              moderateUser(report.reported.id, "ban", report.reason)
-                            }
+                            onClick={() => moderateUser(report.reported.id, "ban", report.reason)}
                             className="flex items-center gap-1 rounded bg-red-600 px-3 py-1 font-bold text-white hover:bg-red-700"
                           >
                             <Ban size={15} />
@@ -624,9 +640,7 @@ export default function App() {
                           <p className="mb-2 font-bold">Reported chat snippet</p>
 
                           {report.snippet.length === 0 ? (
-                            <p className="text-gray-500">
-                              No messages were captured.
-                            </p>
+                            <p className="text-gray-500">No messages were captured.</p>
                           ) : (
                             <div className="space-y-1">
                               {report.snippet.map((msg, index) => (
@@ -720,10 +734,7 @@ export default function App() {
               {messages.map((msg, index) => {
                 if (msg.from === "system") {
                   return (
-                    <p
-                      key={index}
-                      className="text-left font-bold text-blue-600"
-                    >
+                    <p key={index} className="text-left font-bold text-blue-600">
                       {msg.text}
                     </p>
                   );
@@ -746,10 +757,7 @@ export default function App() {
                     </span>
 
                     {isModerator && (
-                      <ShieldCheck
-                        size={15}
-                        className="mr-1 inline text-blue-600"
-                      />
+                      <ShieldCheck size={15} className="mr-1 inline text-blue-600" />
                     )}
 
                     <span>{msg.text}</span>
