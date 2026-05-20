@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { io, Socket } from "socket.io-client";
 import { supabase } from "./lib/supabase";
+
 import {
   MessageCircle,
   Video,
@@ -9,12 +10,10 @@ import {
   Shuffle,
   User,
   X,
- Search,
+  Search,
   Users,
   Keyboard,
   ShieldCheck,
-  LogIn,
-  UserPlus,
   Flag,
   AlertTriangle,
   Trash2,
@@ -84,47 +83,87 @@ const rtcConfig: RTCConfiguration = {
 };
 
 export default function App() {
-  const [session, setSession] = useState<Session | null>(null);
-  const [currentUser, setCurrentUser] = useState<PublicUser | null>(null);
+  const [, setSession] = useState<Session | null>(null);
 
-  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [currentUser, setCurrentUser] =
+    useState<PublicUser | null>(null);
+
+  const [authMode, setAuthMode] =
+    useState<"login" | "register">("login");
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  const [status, setStatus] = useState<Status>("idle");
-  const [mode, setMode] = useState<SearchMode>("chat");
-  const [matchedMode, setMatchedMode] = useState<SearchMode | null>(null);
-  const [stranger, setStranger] = useState<PublicUser | null>(null);
+  const [status, setStatus] =
+    useState<Status>("idle");
 
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [, setMode] =
+    useState<SearchMode>("chat");
+
+  const [matchedMode, setMatchedMode] =
+    useState<SearchMode | null>(null);
+
+  const [, setStranger] =
+    useState<PublicUser | null>(null);
+
+  const [messages, setMessages] =
+    useState<Message[]>([]);
+
   const [input, setInput] = useState("");
 
-  const [onlineCount, setOnlineCount] = useState(0);
-  const [strangerTyping, setStrangerTyping] = useState(false);
+  const [onlineCount, setOnlineCount] =
+    useState(0);
 
-  const [interestInput, setInterestInput] = useState("");
-  const [interests, setInterests] = useState<string[]>([]);
-  const [sharedInterests, setSharedInterests] = useState<string[]>([]);
+  const [strangerTyping, setStrangerTyping] =
+    useState(false);
 
-  const [reportReason, setReportReason] = useState("");
-  const [reportStatus, setReportStatus] = useState("");
+  const [interestInput, setInterestInput] =
+    useState("");
 
-  const [showModPanel, setShowModPanel] = useState(false);
-  const [reports, setReports] = useState<Report[]>([]);
-  const [expandedReportId, setExpandedReportId] = useState<string | null>(null);
+  const [, setInterests] =
+    useState<string[]>([]);
 
-  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [sharedInterests, setSharedInterests] =
+    useState<string[]>([]);
 
-  const [cameraEnabled, setCameraEnabled] = useState(true);
-  const [micEnabled, setMicEnabled] = useState(true);
+  const [reportReason, setReportReason] =
+    useState("");
 
-  const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const [reportStatus, setReportStatus] =
+    useState("");
 
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const peerRef = useRef<RTCPeerConnection | null>(null);
+  const [showModPanel, setShowModPanel] =
+    useState(false);
 
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const [reports, setReports] =
+    useState<Report[]>([]);
+
+  const [expandedReportId, setExpandedReportId] =
+    useState<string | null>(null);
+
+  const [notifications, setNotifications] =
+    useState<Notification[]>([]);
+
+  const [cameraEnabled, setCameraEnabled] =
+    useState(true);
+
+  const [micEnabled, setMicEnabled] =
+    useState(true);
+
+  const localVideoRef =
+    useRef<HTMLVideoElement | null>(null);
+
+  const remoteVideoRef =
+    useRef<HTMLVideoElement | null>(null);
+
+  const localStreamRef =
+    useRef<MediaStream | null>(null);
+
+  const peerRef =
+    useRef<RTCPeerConnection | null>(null);
+
+  const bottomRef =
+    useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     async function initAuth() {
