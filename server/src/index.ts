@@ -33,6 +33,18 @@ type Report = {
   createdAt: string;
 };
 
+type WaitingEntry = {
+  socketId: string;
+  interests: string[];
+};
+
+type FindMatchPayload =
+  | SearchMode
+  | {
+      mode: SearchMode;
+      interests?: string[];
+    };
+
 type Notification = {
   id: string;
   type: "info" | "warning" | "success" | "error";
@@ -44,9 +56,9 @@ const socketUsers = new Map<string, PublicUser>();
 const partners = new Map<string, string>();
 const chatLogs = new Map<string, ChatMessage[]>();
 
-const waitingUsers = new Map<SearchMode, string | null>([
-  ["chat", null],
-  ["video", null],
+const waitingUsers = new Map<SearchMode, WaitingEntry[]>([
+  ["chat", []],
+  ["video", []],
 ]);
 
 const app = express();
@@ -63,6 +75,37 @@ const io = new Server(server, {
 
 function emitOnlineCount() {
   io.emit("online-count", io.engine.clientsCount);
+}
+
+function normalizeInterests(interests: unknown): string[] {
+  if (!Array.isArray(interests)) return [];
+
+  return interests
+    .map((interest) => String(interest).trim().toLowerCase())
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function hasSharedInterest(a: string[], b: string[]) {
+  if (a.length === 0 || b.length === 0) return true;
+  return a.some((interest) => b.includes(interest));
+}
+
+function parseFindMatchPayload(payload: FindMatchPayload): {
+  mode: SearchMode;
+  interests: string[];
+} {
+  if (payload === "chat" || payload === "video") {
+    return {
+      mode: payload,
+      interests: [],
+    };
+  }
+
+  return {
+    mode: payload?.mode === "video" ? "video" : "chat",
+    interests: normalizeInterests(payload?.interests),
+  };
 }
 
 function getChatKey(a: string, b: string) {
@@ -181,6 +224,15 @@ function notifyMods(message: string) {
   }
 }
 
+function removeFromWaiting(socketId: string) {
+  for (const [mode, queue] of waitingUsers.entries()) {
+    waitingUsers.set(
+      mode,
+      queue.filter((entry) => entry.socketId !== socketId)
+    );
+  }
+}
+
 function disconnectPair(socketId: string) {
   const partnerId = partners.get(socketId);
 
@@ -190,11 +242,7 @@ function disconnectPair(socketId: string) {
     io.to(partnerId).emit("partner-left");
   }
 
-  for (const [mode, waitingUser] of waitingUsers.entries()) {
-    if (waitingUser === socketId) {
-      waitingUsers.set(mode, null);
-    }
-  }
+  removeFromWaiting(socketId);
 }
 
 io.on("connection", (socket: Socket) => {
@@ -247,7 +295,7 @@ io.on("connection", (socket: Socket) => {
     socketUsers.delete(socket.id);
   });
 
-  socket.on("find-match", async (mode: SearchMode = "chat") => {
+  socket.on("find-match", async (payload: FindMatchPayload) => {
     const user = socketUsers.get(socket.id);
 
     if (!user) {
@@ -267,32 +315,65 @@ io.on("connection", (socket: Socket) => {
       return;
     }
 
-    const waitingUser = waitingUsers.get(mode);
+    const { mode, interests } = parseFindMatchPayload(payload);
 
-    if (waitingUser && waitingUser !== socket.id) {
-      const partnerId = waitingUser;
-      waitingUsers.set(mode, null);
+    removeFromWaiting(socket.id);
+
+    const queue = waitingUsers.get(mode) || [];
+
+    let matchIndex = queue.findIndex(
+      (entry) =>
+        entry.socketId !== socket.id &&
+        hasSharedInterest(entry.interests, interests)
+    );
+
+    if (matchIndex === -1 && queue.length > 0) {
+      matchIndex = queue.findIndex((entry) => entry.socketId !== socket.id);
+    }
+
+    if (matchIndex !== -1) {
+      const [match] = queue.splice(matchIndex, 1);
+      waitingUsers.set(mode, queue);
+
+      const partnerId = match.socketId;
 
       partners.set(socket.id, partnerId);
       partners.set(partnerId, socket.id);
 
       chatLogs.set(getChatKey(socket.id, partnerId), []);
 
+      const sharedInterests = interests.filter((interest) =>
+        match.interests.includes(interest)
+      );
+
       socket.emit("match-found", {
         mode,
         stranger: getPublicUser(partnerId),
+        interests: sharedInterests,
+        initiator: true,
       });
 
       io.to(partnerId).emit("match-found", {
         mode,
         stranger: getPublicUser(socket.id),
+        interests: sharedInterests,
+        initiator: false,
       });
 
       return;
     }
 
-    waitingUsers.set(mode, socket.id);
-    socket.emit("waiting", { mode });
+    queue.push({
+      socketId: socket.id,
+      interests,
+    });
+
+    waitingUsers.set(mode, queue);
+
+    socket.emit("waiting", {
+      mode,
+      interests,
+    });
   });
 
   socket.on("send-message", (message: string) => {
@@ -326,6 +407,27 @@ io.on("connection", (socket: Socket) => {
     if (!partnerId) return;
 
     io.to(partnerId).emit("stranger-typing");
+  });
+
+  socket.on("webrtc-offer", (offer) => {
+    const partnerId = partners.get(socket.id);
+    if (!partnerId) return;
+
+    io.to(partnerId).emit("webrtc-offer", offer);
+  });
+
+  socket.on("webrtc-answer", (answer) => {
+    const partnerId = partners.get(socket.id);
+    if (!partnerId) return;
+
+    io.to(partnerId).emit("webrtc-answer", answer);
+  });
+
+  socket.on("webrtc-ice-candidate", (candidate) => {
+    const partnerId = partners.get(socket.id);
+    if (!partnerId) return;
+
+    io.to(partnerId).emit("webrtc-ice-candidate", candidate);
   });
 
   socket.on("submit-report", async (reason: string, callback) => {

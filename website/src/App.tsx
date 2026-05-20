@@ -9,7 +9,7 @@ import {
   Shuffle,
   User,
   X,
-  Search,
+ Search,
   Users,
   Keyboard,
   ShieldCheck,
@@ -23,6 +23,10 @@ import {
   CheckCircle,
   Ban,
   Megaphone,
+  Mic,
+  MicOff,
+  VideoOff,
+  Tags,
 } from "lucide-react";
 
 const socket: Socket = io(import.meta.env.VITE_SOCKET_URL, {
@@ -68,9 +72,21 @@ type Notification = {
   createdAt: string;
 };
 
+const rtcConfig: RTCConfiguration = {
+  iceServers: [
+    {
+      urls: [
+        "stun:stun.l.google.com:19302",
+        "stun:stun1.l.google.com:19302",
+      ],
+    },
+  ],
+};
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [currentUser, setCurrentUser] = useState<PublicUser | null>(null);
+
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -82,8 +98,13 @@ export default function App() {
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+
   const [onlineCount, setOnlineCount] = useState(0);
   const [strangerTyping, setStrangerTyping] = useState(false);
+
+  const [interestInput, setInterestInput] = useState("");
+  const [interests, setInterests] = useState<string[]>([]);
+  const [sharedInterests, setSharedInterests] = useState<string[]>([]);
 
   const [reportReason, setReportReason] = useState("");
   const [reportStatus, setReportStatus] = useState("");
@@ -91,109 +112,19 @@ export default function App() {
   const [showModPanel, setShowModPanel] = useState(false);
   const [reports, setReports] = useState<Report[]>([]);
   const [expandedReportId, setExpandedReportId] = useState<string | null>(null);
+
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
+  const [cameraEnabled, setCameraEnabled] = useState(true);
+  const [micEnabled, setMicEnabled] = useState(true);
+
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const peerRef = useRef<RTCPeerConnection | null>(null);
+
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const typingTimeoutRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    socket.on("connect", () => {
-      if (session?.access_token) {
-        serverLogin(session.access_token);
-      }
-    });
-
-    socket.on("online-count", (count: number) => setOnlineCount(count));
-
-    socket.on("notification", (notification: Notification) => {
-      setNotifications((prev) => [notification, ...prev.slice(0, 4)]);
-    });
-
-    socket.on("banned", async () => {
-      await supabase.auth.signOut();
-      setCurrentUser(null);
-      setSession(null);
-      setStatus("idle");
-      setMatchedMode(null);
-      setStranger(null);
-      setMessages([{ from: "system", text: "You were banned by a moderator." }]);
-    });
-
-    socket.on("waiting", ({ mode }: { mode: SearchMode }) => {
-      setStatus("waiting");
-      setMatchedMode(mode);
-      setStranger(null);
-    });
-
-    socket.on(
-      "match-found",
-      ({ mode, stranger }: { mode: SearchMode; stranger: PublicUser }) => {
-        setStatus("matched");
-        setMatchedMode(mode);
-        setStranger(stranger);
-        setReportStatus("");
-        setReportReason("");
-        setMessages([
-          {
-            from: "system",
-            text: `You're now chatting with ${stranger.username}.`,
-          },
-        ]);
-      }
-    );
-
-    socket.on("receive-message", (payload: { text: string; user: PublicUser }) => {
-      setStrangerTyping(false);
-      setMessages((prev) => [
-        ...prev,
-        { from: "stranger", text: payload.text, user: payload.user },
-      ]);
-    });
-
-    socket.on("stranger-typing", () => {
-      setStrangerTyping(true);
-
-      if (typingTimeoutRef.current) {
-        window.clearTimeout(typingTimeoutRef.current);
-      }
-
-      typingTimeoutRef.current = window.setTimeout(() => {
-        setStrangerTyping(false);
-      }, 1200);
-    });
-
-    socket.on("partner-left", () => {
-      setStatus("idle");
-      setMatchedMode(null);
-      setStranger(null);
-      setStrangerTyping(false);
-      setMessages((prev) => [
-        ...prev,
-        { from: "system", text: "Stranger disconnected." },
-      ]);
-    });
-
-    socket.on("reports-updated", (updatedReports: Report[]) => {
-      setReports(updatedReports);
-    });
-
-    return () => {
-      socket.off("connect");
-      socket.off("online-count");
-      socket.off("notification");
-      socket.off("banned");
-      socket.off("waiting");
-      socket.off("match-found");
-      socket.off("receive-message");
-      socket.off("stranger-typing");
-      socket.off("partner-left");
-      socket.off("reports-updated");
-
-      if (typingTimeoutRef.current) {
-        window.clearTimeout(typingTimeoutRef.current);
-      }
-    };
-  }, [session]);
 
   useEffect(() => {
     async function initAuth() {
@@ -226,16 +157,176 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView();
-  }, [messages, strangerTyping]);
+    socket.on("online-count", (count: number) => setOnlineCount(count));
 
-  function serverLogin(accessToken: string) {
+    socket.on("notification", (notification: Notification) => {
+      setNotifications((prev) => [notification, ...prev.slice(0, 4)]);
+    });
+
+    socket.on("banned", async () => {
+      await supabase.auth.signOut();
+
+      cleanupVideo();
+
+      setCurrentUser(null);
+      setSession(null);
+      setStatus("idle");
+      setMatchedMode(null);
+      setStranger(null);
+
+      setMessages([
+        {
+          from: "system",
+          text: "You were banned by a moderator.",
+        },
+      ]);
+    });
+
+    socket.on("waiting", ({ mode }: { mode: SearchMode }) => {
+      setStatus("waiting");
+      setMatchedMode(mode);
+      setStranger(null);
+    });
+
+    socket.on(
+      "match-found",
+      async ({
+        mode,
+        stranger,
+        interests,
+        initiator,
+      }: {
+        mode: SearchMode;
+        stranger: PublicUser;
+        interests: string[];
+        initiator: boolean;
+      }) => {
+        setStatus("matched");
+        setMatchedMode(mode);
+        setStranger(stranger);
+        setSharedInterests(interests || []);
+
+        setMessages([
+          {
+            from: "system",
+            text: `You're now chatting with ${stranger.username}.`,
+          },
+        ]);
+
+        if (mode === "video") {
+          await startVideo(initiator);
+        }
+      }
+    );
+
+    socket.on(
+      "receive-message",
+      (payload: { text: string; user: PublicUser }) => {
+        setStrangerTyping(false);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            from: "stranger",
+            text: payload.text,
+            user: payload.user,
+          },
+        ]);
+      }
+    );
+
+    socket.on("stranger-typing", () => {
+      setStrangerTyping(true);
+
+      setTimeout(() => {
+        setStrangerTyping(false);
+      }, 1000);
+    });
+
+    socket.on("partner-left", () => {
+      cleanupVideo();
+
+      setStatus("idle");
+      setMatchedMode(null);
+      setStranger(null);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          from: "system",
+          text: "Stranger disconnected.",
+        },
+      ]);
+    });
+
+    socket.on("reports-updated", (updatedReports: Report[]) => {
+      setReports(updatedReports);
+    });
+
+    socket.on("webrtc-offer", async (offer) => {
+      if (!peerRef.current) {
+        await createPeer(false);
+      }
+
+      const peer = peerRef.current;
+
+      if (!peer) return;
+
+      await peer.setRemoteDescription(
+        new RTCSessionDescription(offer)
+      );
+
+      const answer = await peer.createAnswer();
+
+      await peer.setLocalDescription(answer);
+
+      socket.emit("webrtc-answer", answer);
+    });
+
+    socket.on("webrtc-answer", async (answer) => {
+      if (!peerRef.current) return;
+
+      await peerRef.current.setRemoteDescription(
+        new RTCSessionDescription(answer)
+      );
+    });
+
+    socket.on("webrtc-ice-candidate", async (candidate) => {
+      if (!peerRef.current) return;
+
+      try {
+        await peerRef.current.addIceCandidate(candidate);
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    return () => {
+      socket.off();
+    };
+  }, []);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView();
+  }, [messages]);
+
+  async function serverLogin(accessToken: string) {
     socket.emit(
       "auth-login",
       accessToken,
-      (response: { success: boolean; user?: PublicUser; error?: string }) => {
+      (
+        response: {
+          success: boolean;
+          user?: PublicUser;
+          error?: string;
+        }
+      ) => {
         if (!response.success || !response.user) {
-          addLocalNotification("error", response.error || "Server login failed.");
+          addNotification(
+            "error",
+            response.error || "Server login failed."
+          );
+
           return;
         }
 
@@ -249,11 +340,6 @@ export default function App() {
   }
 
   async function handleAuth() {
-    if (!email.trim() || !password.trim()) {
-      addLocalNotification("error", "Enter an email and password.");
-      return;
-    }
-
     if (authMode === "register") {
       const { data, error } = await supabase.auth.signUp({
         email,
@@ -261,37 +347,40 @@ export default function App() {
       });
 
       if (error) {
-        addLocalNotification("error", error.message);
+        addNotification("error", error.message);
         return;
       }
 
       if (data.session?.access_token) {
-        setSession(data.session);
         serverLogin(data.session.access_token);
       }
 
-      addLocalNotification("success", "Account created.");
+      addNotification("success", "Account created.");
+
       return;
     }
 
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    const { data, error } =
+      await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
 
     if (error) {
-      addLocalNotification("error", error.message);
+      addNotification("error", error.message);
       return;
     }
 
     if (data.session?.access_token) {
-      setSession(data.session);
       serverLogin(data.session.access_token);
     }
   }
 
   async function logout() {
+    cleanupVideo();
+
     socket.emit("logout");
+
     await supabase.auth.signOut();
 
     setCurrentUser(null);
@@ -303,7 +392,10 @@ export default function App() {
     setReports([]);
   }
 
-  function addLocalNotification(type: Notification["type"], message: string) {
+  function addNotification(
+    type: Notification["type"],
+    message: string
+  ) {
     setNotifications((prev) => [
       {
         id: crypto.randomUUID(),
@@ -316,34 +408,58 @@ export default function App() {
   }
 
   function removeNotification(id: string) {
-    setNotifications((prev) => prev.filter((item) => item.id !== id));
+    setNotifications((prev) =>
+      prev.filter((item) => item.id !== id)
+    );
+  }
+
+  function parseInterests() {
+    return interestInput
+      .split(",")
+      .map((interest) =>
+        interest.trim().toLowerCase()
+      )
+      .filter(Boolean)
+      .slice(0, 8);
   }
 
   function startSearch(selectedMode: SearchMode) {
+    const parsedInterests = parseInterests();
+
+    setInterests(parsedInterests);
+
     setMode(selectedMode);
     setMatchedMode(selectedMode);
+
     setMessages([]);
     setStranger(null);
-    setStrangerTyping(false);
-    setReportStatus("");
-    setReportReason("");
+    setSharedInterests([]);
 
-    socket.emit("find-match", selectedMode);
+    socket.emit("find-match", {
+      mode: selectedMode,
+      interests: parsedInterests,
+    });
   }
 
   function stopChat() {
+    cleanupVideo();
+
     socket.emit("next");
+
     setStatus("idle");
     setMatchedMode(null);
     setMessages([]);
     setStranger(null);
-    setStrangerTyping(false);
+    setSharedInterests([]);
   }
 
-  function sendMessage(e: React.FormEvent<HTMLFormElement>) {
+  function sendMessage(
+    e: React.FormEvent<HTMLFormElement>
+  ) {
     e.preventDefault();
 
     const trimmed = input.trim();
+
     if (!trimmed || status !== "matched") return;
 
     socket.emit("send-message", trimmed);
@@ -360,7 +476,9 @@ export default function App() {
     setInput("");
   }
 
-  function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+  function handleInputChange(
+    e: React.ChangeEvent<HTMLInputElement>
+  ) {
     setInput(e.target.value);
 
     if (status === "matched") {
@@ -368,26 +486,150 @@ export default function App() {
     }
   }
 
+  async function createPeer(initiator: boolean) {
+    const peer = new RTCPeerConnection(rtcConfig);
+
+    peerRef.current = peer;
+
+    if (localStreamRef.current) {
+      localStreamRef.current
+        .getTracks()
+        .forEach((track) => {
+          peer.addTrack(
+            track,
+            localStreamRef.current as MediaStream
+          );
+        });
+    }
+
+    peer.ontrack = (event) => {
+      const [stream] = event.streams;
+
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = stream;
+      }
+    };
+
+    peer.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.emit(
+          "webrtc-ice-candidate",
+          event.candidate
+        );
+      }
+    };
+
+    if (initiator) {
+      const offer = await peer.createOffer();
+
+      await peer.setLocalDescription(offer);
+
+      socket.emit("webrtc-offer", offer);
+    }
+  }
+
+  async function startVideo(initiator: boolean) {
+    try {
+      const stream =
+        await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
+
+      localStreamRef.current = stream;
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+
+      await createPeer(initiator);
+    } catch {
+      addNotification(
+        "error",
+        "Could not access camera/microphone."
+      );
+    }
+  }
+
+  function cleanupVideo() {
+    if (peerRef.current) {
+      peerRef.current.close();
+      peerRef.current = null;
+    }
+
+    if (localStreamRef.current) {
+      localStreamRef.current
+        .getTracks()
+        .forEach((track) => track.stop());
+
+      localStreamRef.current = null;
+    }
+
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
+  }
+
+  function toggleCamera() {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+
+    const videoTrack = stream.getVideoTracks()[0];
+
+    if (!videoTrack) return;
+
+    videoTrack.enabled = !videoTrack.enabled;
+
+    setCameraEnabled(videoTrack.enabled);
+  }
+
+  function toggleMic() {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+
+    const audioTrack = stream.getAudioTracks()[0];
+
+    if (!audioTrack) return;
+
+    audioTrack.enabled = !audioTrack.enabled;
+
+    setMicEnabled(audioTrack.enabled);
+  }
+
   function submitReport() {
     const reason = reportReason.trim();
 
     if (!reason) {
-      setReportStatus("Please enter a report reason.");
+      setReportStatus("Please enter a reason.");
       return;
     }
 
     socket.emit(
       "submit-report",
       reason,
-      (response: { success: boolean; error?: string }) => {
+      (response: {
+        success: boolean;
+        error?: string;
+      }) => {
         if (!response.success) {
-          setReportStatus(response.error || "Could not submit report.");
+          setReportStatus(
+            response.error || "Could not submit report."
+          );
+
           return;
         }
 
         setReportReason("");
         setReportStatus("Report submitted.");
-        addLocalNotification("success", "Report submitted to moderators.");
+
+        addNotification(
+          "success",
+          "Report submitted."
+        );
       }
     );
   }
@@ -395,9 +637,19 @@ export default function App() {
   function loadReports() {
     socket.emit(
       "get-reports",
-      (response: { success: boolean; reports?: Report[]; error?: string }) => {
+      (
+        response: {
+          success: boolean;
+          reports?: Report[];
+          error?: string;
+        }
+      ) => {
         if (!response.success) {
-          addLocalNotification("error", response.error || "Could not load reports.");
+          addNotification(
+            "error",
+            response.error || "Could not load reports."
+          );
+
           return;
         }
 
@@ -407,128 +659,163 @@ export default function App() {
   }
 
   function clearReports() {
-    socket.emit("clear-reports", (response: { success: boolean; error?: string }) => {
-      if (!response.success) {
-        addLocalNotification("error", response.error || "Could not clear reports.");
-        return;
-      }
+    socket.emit(
+      "clear-reports",
+      (
+        response: {
+          success: boolean;
+          error?: string;
+        }
+      ) => {
+        if (!response.success) {
+          addNotification(
+            "error",
+            response.error || "Could not clear reports."
+          );
 
-      setReports([]);
-      addLocalNotification("success", "Reports cleared.");
-    });
+          return;
+        }
+
+        setReports([]);
+
+        addNotification(
+          "success",
+          "Reports cleared."
+        );
+      }
+    );
   }
 
   function markReviewed(reportId: string) {
     socket.emit(
       "mark-report-reviewed",
       reportId,
-      (response: { success: boolean; error?: string }) => {
+      (
+        response: {
+          success: boolean;
+          error?: string;
+        }
+      ) => {
         if (!response.success) {
-          addLocalNotification("error", response.error || "Could not review report.");
+          addNotification(
+            "error",
+            response.error || "Could not review report."
+          );
+
           return;
         }
 
-        addLocalNotification("success", "Report marked reviewed.");
-      }
-    );
-  }
-
-  function moderateUser(targetUserId: string, action: "warn" | "ban", reason: string) {
-    socket.emit(
-      "moderation-action",
-      { targetUserId, action, reason },
-      (response: { success: boolean; error?: string }) => {
-        if (!response.success) {
-          addLocalNotification("error", response.error || "Action failed.");
-          return;
-        }
-
-        addLocalNotification(
+        addNotification(
           "success",
-          action === "ban" ? "User banned." : "User warned."
+          "Report reviewed."
         );
       }
     );
   }
 
-  const unreadReports = reports.filter((report) => report.status === "open").length;
+  function moderateUser(
+    targetUserId: string,
+    action: "warn" | "ban",
+    reason: string
+  ) {
+    socket.emit(
+      "moderation-action",
+      {
+        targetUserId,
+        action,
+        reason,
+      },
+      (
+        response: {
+          success: boolean;
+          error?: string;
+        }
+      ) => {
+        if (!response.success) {
+          addNotification(
+            "error",
+            response.error || "Action failed."
+          );
+
+          return;
+        }
+
+        addNotification(
+          "success",
+          action === "ban"
+            ? "User banned."
+            : "User warned."
+        );
+      }
+    );
+  }
+
+  const unreadReports = reports.filter(
+    (report) => report.status === "open"
+  ).length;
 
   if (!currentUser) {
     return (
-      <main className="min-h-screen bg-[#f3f3f3] text-black">
-        <NotificationStack notifications={notifications} onClose={removeNotification} />
+      <main className="min-h-screen bg-[#f3f3f3] flex items-center justify-center px-4">
+        <div className="w-full max-w-md bg-white border border-gray-300 rounded p-6 shadow-sm">
+          <h1 className="text-4xl font-bold">
+            Ome<span className="text-orange-500">Clone</span>
+          </h1>
 
-        <div className="mx-auto flex min-h-screen max-w-md items-center justify-center px-4">
-          <section className="w-full rounded border border-gray-300 bg-white p-6 shadow-sm">
-            <h1 className="text-4xl font-bold">
-              Ome<span className="text-orange-500">Clone</span>
-            </h1>
+          <div className="mt-6 flex gap-2">
+            <button
+              onClick={() => setAuthMode("login")}
+              className={`flex-1 py-2 rounded font-bold ${
+                authMode === "login"
+                  ? "bg-blue-600 text-white"
+                  : "border"
+              }`}
+            >
+              Login
+            </button>
 
-            <p className="mt-1 text-sm text-gray-600">
-              Sign in with Supabase Auth.
-            </p>
+            <button
+              onClick={() => setAuthMode("register")}
+              className={`flex-1 py-2 rounded font-bold ${
+                authMode === "register"
+                  ? "bg-orange-500 text-white"
+                  : "border"
+              }`}
+            >
+              Register
+            </button>
+          </div>
 
-            <div className="mt-6 flex gap-2">
-              <button
-                onClick={() => setAuthMode("login")}
-                className={`flex-1 rounded px-4 py-2 font-bold ${
-                  authMode === "login"
-                    ? "bg-blue-600 text-white"
-                    : "border border-gray-300 bg-white"
-                }`}
-              >
-                <div className="flex items-center justify-center gap-2">
-                  <LogIn size={18} />
-                  Login
-                </div>
-              </button>
+          <div className="mt-5 space-y-3">
+            <input
+              type="email"
+              value={email}
+              onChange={(e) =>
+                setEmail(e.target.value)
+              }
+              placeholder="Email"
+              className="w-full border px-3 py-2"
+            />
 
-              <button
-                onClick={() => setAuthMode("register")}
-                className={`flex-1 rounded px-4 py-2 font-bold ${
-                  authMode === "register"
-                    ? "bg-orange-500 text-white"
-                    : "border border-gray-300 bg-white"
-                }`}
-              >
-                <div className="flex items-center justify-center gap-2">
-                  <UserPlus size={18} />
-                  Register
-                </div>
-              </button>
-            </div>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) =>
+                setPassword(e.target.value)
+              }
+              placeholder="Password"
+              className="w-full border px-3 py-2"
+            />
 
-            <div className="mt-5 space-y-3">
-              <input
-                name="email"
-                id="email"
-                type="email"
-                autoComplete="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="Email"
-                className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
-              />
-
-              <input
-                name="password"
-                id="password"
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Password"
-                className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
-              />
-
-              <button
-                onClick={handleAuth}
-                className="w-full rounded bg-blue-600 py-2 font-bold text-white hover:bg-blue-700"
-              >
-                {authMode === "login" ? "Login" : "Create Account"}
-              </button>
-            </div>
-          </section>
+            <button
+              onClick={handleAuth}
+              className="w-full bg-blue-600 text-white font-bold py-2 rounded"
+            >
+              {authMode === "login"
+                ? "Login"
+                : "Create Account"}
+            </button>
+          </div>
         </div>
       </main>
     );
@@ -536,13 +823,11 @@ export default function App() {
 
   return (
     <main className="min-h-screen bg-[#f3f3f3] text-black">
-      <NotificationStack notifications={notifications} onClose={removeNotification} />
-
-      <div className="mx-auto max-w-5xl px-4 py-4">
-        <header className="mb-4 border-b border-gray-300 pb-3">
-          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+      <div className="mx-auto max-w-6xl px-4 py-4">
+        <header className="mb-4 border-b pb-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <h1 className="text-5xl font-bold tracking-tight">
+              <h1 className="text-5xl font-bold">
                 Ome<span className="text-orange-500">Clone</span>
               </h1>
 
@@ -552,36 +837,48 @@ export default function App() {
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-2">
               {currentUser.role === "moderator" && (
                 <button
-                  onClick={() => {
-                    setShowModPanel((prev) => !prev);
-                    loadReports();
-                  }}
-                  className="relative flex items-center gap-2 rounded bg-blue-600 px-3 py-2 text-sm font-bold text-white hover:bg-blue-700"
+                  onClick={() =>
+                    setShowModPanel(
+                      (prev) => !prev
+                    )
+                  }
+                  className="relative bg-blue-600 text-white px-3 py-2 rounded font-bold"
                 >
-                  <ShieldCheck size={17} />
+                  <ShieldCheck
+                    size={16}
+                    className="inline mr-1"
+                  />
                   Mod Panel
+
                   {unreadReports > 0 && (
-                    <span className="absolute -right-2 -top-2 rounded-full bg-red-600 px-2 py-0.5 text-xs">
+                    <span className="absolute -top-2 -right-2 bg-red-600 rounded-full px-2 text-xs">
                       {unreadReports}
                     </span>
                   )}
                 </button>
               )}
 
-              <div className="flex items-center gap-3 rounded border border-gray-300 bg-white px-3 py-2 shadow-sm">
-                <User size={18} className="text-gray-500" />
-                <span className="font-bold">{currentUser.username}</span>
+              <div className="bg-white border rounded px-3 py-2 flex items-center gap-2">
+                <User size={18} />
 
-                {currentUser.role === "moderator" && (
-                  <ShieldCheck size={18} className="text-blue-600" />
+                <span className="font-bold">
+                  {currentUser.username}
+                </span>
+
+                {currentUser.role ===
+                  "moderator" && (
+                  <ShieldCheck
+                    size={18}
+                    className="text-blue-600"
+                  />
                 )}
 
                 <button
                   onClick={logout}
-                  className="rounded border border-gray-300 bg-gray-100 px-3 py-1 text-sm hover:bg-gray-200"
+                  className="ml-2 border px-3 py-1 rounded text-sm"
                 >
                   Logout
                 </button>
@@ -590,192 +887,157 @@ export default function App() {
           </div>
         </header>
 
-        {showModPanel && currentUser.role === "moderator" && (
-          <section className="mb-4 rounded border border-blue-300 bg-white p-4 shadow-sm">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="flex items-center gap-2 text-xl font-bold text-blue-700">
-                <ShieldCheck size={22} />
-                Moderator Panel
-              </h2>
+        <section className="mb-4 bg-white border rounded p-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex-1">
+              <label className="text-sm font-bold flex items-center gap-2 mb-2">
+                <Tags size={16} />
+                Interests
+              </label>
 
-              <button
-                onClick={clearReports}
-                className="flex items-center gap-2 rounded border border-gray-400 bg-gray-100 px-3 py-2 text-sm hover:bg-gray-200"
-              >
-                <Trash2 size={16} />
-                Clear Reports
-              </button>
+              <input
+                value={interestInput}
+                onChange={(e) =>
+                  setInterestInput(
+                    e.target.value
+                  )
+                }
+                placeholder="gaming, music, football..."
+                className="w-full border px-3 py-2"
+              />
             </div>
 
-            {reports.length === 0 ? (
-              <p className="text-sm text-gray-600">No reports yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {reports.map((report) => {
-                  const expanded = expandedReportId === report.id;
+            <div className="flex gap-2">
+              <button
+                onClick={() =>
+                  startSearch("chat")
+                }
+                className="bg-blue-600 text-white px-4 py-2 rounded font-bold flex items-center gap-2"
+              >
+                <MessageCircle size={18} />
+                Text
+              </button>
 
-                  return (
-                    <div key={report.id} className="rounded border border-gray-300 bg-gray-50 p-3 text-sm">
-                      <div className="flex flex-col justify-between gap-2 sm:flex-row">
-                        <div>
-                          <p className="font-bold text-red-600">
-                            Reported: {report.reported.username}
-                          </p>
-                          <p>Reporter: {report.reporter.username}</p>
-                          <p className="mt-1">
-                            <span className="font-bold">Reason:</span>{" "}
-                            {report.reason}
-                          </p>
-                          <p className="mt-1 text-xs text-gray-500">
-                            {new Date(report.createdAt).toLocaleString()} •{" "}
-                            {report.status}
-                          </p>
-                        </div>
+              <button
+                onClick={() =>
+                  startSearch("video")
+                }
+                className="bg-orange-500 text-white px-4 py-2 rounded font-bold flex items-center gap-2"
+              >
+                <Video size={18} />
+                Video
+              </button>
 
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() => setExpandedReportId(expanded ? null : report.id)}
-                            className="flex items-center gap-1 rounded border border-gray-400 bg-white px-3 py-1 font-bold hover:bg-gray-100"
-                          >
-                            <Eye size={15} />
-                            Snippet
-                          </button>
+              <button
+                onClick={stopChat}
+                className="border px-4 py-2 rounded flex items-center gap-2"
+              >
+                <Shuffle size={18} />
+                Next
+              </button>
+            </div>
+          </div>
 
-                          <button
-                            onClick={() => markReviewed(report.id)}
-                            className="flex items-center gap-1 rounded bg-green-600 px-3 py-1 font-bold text-white hover:bg-green-700"
-                          >
-                            <CheckCircle size={15} />
-                            Reviewed
-                          </button>
+          {sharedInterests.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {sharedInterests.map(
+                (interest) => (
+                  <span
+                    key={interest}
+                    className="bg-blue-100 text-blue-700 px-3 py-1 rounded-full text-sm font-bold"
+                  >
+                    #{interest}
+                  </span>
+                )
+              )}
+            </div>
+          )}
+        </section>
 
-                          <button
-                            onClick={() => moderateUser(report.reported.id, "warn", report.reason)}
-                            className="flex items-center gap-1 rounded bg-yellow-500 px-3 py-1 font-bold text-white hover:bg-yellow-600"
-                          >
-                            <Megaphone size={15} />
-                            Warn
-                          </button>
+        {matchedMode === "video" && (
+          <section className="mb-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-black rounded overflow-hidden relative aspect-video">
+              <video
+                ref={localVideoRef}
+                autoPlay
+                muted
+                playsInline
+                className="w-full h-full object-cover"
+              />
 
-                          <button
-                            onClick={() => moderateUser(report.reported.id, "ban", report.reason)}
-                            className="flex items-center gap-1 rounded bg-red-600 px-3 py-1 font-bold text-white hover:bg-red-700"
-                          >
-                            <Ban size={15} />
-                            Ban
-                          </button>
-                        </div>
-                      </div>
+              <div className="absolute bottom-3 left-3 flex gap-2">
+                <button
+                  onClick={toggleMic}
+                  className="bg-white/80 rounded-full p-2"
+                >
+                  {micEnabled ? (
+                    <Mic size={18} />
+                  ) : (
+                    <MicOff size={18} />
+                  )}
+                </button>
 
-                      {expanded && (
-                        <div className="mt-3 rounded border border-gray-300 bg-white p-3">
-                          <p className="mb-2 font-bold">Reported chat snippet</p>
-
-                          {report.snippet.length === 0 ? (
-                            <p className="text-gray-500">No messages were captured.</p>
-                          ) : (
-                            <div className="space-y-1">
-                              {report.snippet.map((msg, index) => (
-                                <p key={index}>
-                                  <span
-                                    className={
-                                      msg.from.id === report.reported.id
-                                        ? "font-bold text-red-600"
-                                        : "font-bold text-blue-600"
-                                    }
-                                  >
-                                    {msg.from.username}:{" "}
-                                  </span>
-                                  {msg.text}
-                                </p>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                <button
+                  onClick={toggleCamera}
+                  className="bg-white/80 rounded-full p-2"
+                >
+                  {cameraEnabled ? (
+                    <Video size={18} />
+                  ) : (
+                    <VideoOff size={18} />
+                  )}
+                </button>
               </div>
-            )}
+            </div>
+
+            <div className="bg-black rounded overflow-hidden aspect-video">
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                className="w-full h-full object-cover"
+              />
+            </div>
           </section>
         )}
 
-        <section className="mb-4 rounded border border-gray-300 bg-white p-4 shadow-sm">
-          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-            <div>
-              <p className="font-bold">
-                {status === "idle" && "You are not connected."}
-                {status === "waiting" && `Looking for someone in ${mode}...`}
-                {status === "matched" &&
-                  `Connected to ${stranger?.username || "a stranger"}.`}
-              </p>
-
-              <p className="text-sm text-gray-600">
-                Mode: {matchedMode ?? "none"}
-              </p>
-            </div>
-
-            {status === "idle" ? (
-              <div className="flex gap-2">
-                <button
-                  onClick={() => startSearch("chat")}
-                  className="flex items-center gap-2 rounded bg-blue-600 px-4 py-2 font-bold text-white hover:bg-blue-700"
-                >
-                  <MessageCircle size={18} />
-                  Text
-                </button>
-
-                <button
-                  onClick={() => startSearch("video")}
-                  className="flex items-center gap-2 rounded bg-orange-500 px-4 py-2 font-bold text-white hover:bg-orange-600"
-                >
-                  <Video size={18} />
-                  Video
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={stopChat}
-                className="flex items-center gap-2 rounded border border-gray-400 bg-gray-100 px-4 py-2 hover:bg-gray-200"
-              >
-                <X size={18} />
-                Stop
-              </button>
-            )}
-          </div>
-        </section>
-
-        <section className="rounded border border-gray-300 bg-white shadow-sm">
-          <div className="h-[430px] overflow-y-auto bg-white p-3 text-sm">
+        <section className="bg-white border rounded shadow-sm">
+          <div className="h-[420px] overflow-y-auto p-3">
             {status === "idle" && (
-              <div className="flex items-center gap-2 text-gray-500">
-                <Shuffle size={18} />
-                <span>Click Text or Video to start.</span>
-              </div>
+              <p className="text-gray-500">
+                Start chatting with a stranger.
+              </p>
             )}
 
             {status === "waiting" && (
-              <div className="flex items-center gap-2 font-bold text-blue-600">
-                <Search size={18} className="animate-pulse" />
-                <span>Finding someone you can chat with...</span>
-              </div>
+              <p className="font-bold text-blue-600 flex items-center gap-2">
+                <Search
+                  size={18}
+                  className="animate-pulse"
+                />
+                Looking for someone...
+              </p>
             )}
 
-            <div className="mt-2 space-y-1">
+            <div className="space-y-1">
               {messages.map((msg, index) => {
                 if (msg.from === "system") {
                   return (
-                    <p key={index} className="text-left font-bold text-blue-600">
+                    <p
+                      key={index}
+                      className="font-bold text-blue-600"
+                    >
                       {msg.text}
                     </p>
                   );
                 }
 
-                const isModerator = msg.user?.role === "moderator";
+                const isModerator =
+                  msg.user?.role ===
+                  "moderator";
 
                 return (
-                  <p key={index} className="text-left leading-6">
+                  <p key={index}>
                     <span
                       className={
                         msg.from === "me"
@@ -785,52 +1047,64 @@ export default function App() {
                     >
                       {msg.from === "me"
                         ? `${currentUser.username}: `
-                        : `${msg.user?.username || "Stranger"}: `}
+                        : `${msg.user?.username}: `}
                     </span>
 
                     {isModerator && (
-                      <ShieldCheck size={15} className="mr-1 inline text-blue-600" />
+                      <ShieldCheck
+                        size={14}
+                        className="inline mr-1 text-blue-600"
+                      />
                     )}
 
-                    <span>{msg.text}</span>
+                    {msg.text}
                   </p>
                 );
               })}
 
               {strangerTyping && (
-                <p className="flex items-center gap-2 text-left italic text-gray-500">
-                  <Keyboard size={15} />
+                <p className="italic text-gray-500 flex items-center gap-2">
+                  <Keyboard size={14} />
                   Stranger is typing...
                 </p>
               )}
-            </div>
 
-            <div ref={bottomRef} />
+              <div ref={bottomRef} />
+            </div>
           </div>
 
           {status === "matched" && (
-            <div className="border-t border-gray-300 bg-yellow-50 p-2">
-              <div className="flex flex-col gap-2 sm:flex-row">
+            <div className="border-t bg-yellow-50 p-2">
+              <div className="flex gap-2">
                 <input
                   value={reportReason}
-                  onChange={(e) => setReportReason(e.target.value)}
+                  onChange={(e) =>
+                    setReportReason(
+                      e.target.value
+                    )
+                  }
                   placeholder="Report reason..."
-                  className="flex-1 border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:border-red-500"
+                  className="flex-1 border px-3 py-2"
                 />
 
                 <button
                   onClick={submitReport}
-                  type="button"
-                  className="flex items-center justify-center gap-2 rounded bg-red-600 px-4 py-2 text-sm font-bold text-white hover:bg-red-700"
+                  className="bg-red-600 text-white px-4 py-2 rounded font-bold"
                 >
-                  <Flag size={16} />
+                  <Flag
+                    size={16}
+                    className="inline mr-1"
+                  />
                   Report
                 </button>
               </div>
 
               {reportStatus && (
-                <p className="mt-1 flex items-center gap-1 text-sm font-bold text-red-700">
-                  <AlertTriangle size={14} />
+                <p className="mt-1 text-red-700 text-sm font-bold">
+                  <AlertTriangle
+                    size={14}
+                    className="inline mr-1"
+                  />
                   {reportStatus}
                 </p>
               )}
@@ -839,88 +1113,220 @@ export default function App() {
 
           <form
             onSubmit={sendMessage}
-            className="flex gap-2 border-t border-gray-300 bg-gray-100 p-2"
+            className="flex gap-2 border-t bg-gray-100 p-2"
           >
-            <button
-              type="button"
-              onClick={stopChat}
-              disabled={status === "idle"}
-              className="flex items-center gap-2 rounded border border-gray-400 bg-white px-4 py-2 hover:bg-gray-200 disabled:opacity-50"
-            >
-              <Shuffle size={17} />
-              New
-            </button>
-
             <input
               value={input}
               onChange={handleInputChange}
               disabled={status !== "matched"}
-              placeholder={
-                status === "matched"
-                  ? "Type here..."
-                  : "You are not chatting with anyone."
-              }
-              className="flex-1 border border-gray-400 bg-white px-3 py-2 outline-none focus:border-blue-500 disabled:bg-gray-200"
+              placeholder="Type here..."
+              className="flex-1 border px-3 py-2"
             />
 
             <button
               type="submit"
               disabled={status !== "matched"}
-              className="flex items-center gap-2 rounded bg-blue-600 px-5 py-2 font-bold text-white hover:bg-blue-700 disabled:bg-gray-400"
+              className="bg-blue-600 text-white px-5 py-2 rounded font-bold flex items-center gap-2"
             >
-              <Send size={17} />
+              <Send size={16} />
               Send
             </button>
           </form>
         </section>
+
+        {showModPanel &&
+          currentUser.role ===
+            "moderator" && (
+            <section className="mt-4 bg-white border border-blue-300 rounded p-4">
+              <div className="flex justify-between items-center mb-3">
+                <h2 className="font-bold text-xl text-blue-700">
+                  Moderator Panel
+                </h2>
+
+                <button
+                  onClick={clearReports}
+                  className="border px-3 py-2 rounded text-sm"
+                >
+                  <Trash2
+                    size={16}
+                    className="inline mr-1"
+                  />
+                  Clear Reports
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                {reports.map((report) => {
+                  const expanded =
+                    expandedReportId ===
+                    report.id;
+
+                  return (
+                    <div
+                      key={report.id}
+                      className="border rounded p-3 bg-gray-50"
+                    >
+                      <div className="flex flex-col gap-2 md:flex-row md:justify-between">
+                        <div>
+                          <p className="font-bold text-red-600">
+                            Reported:{" "}
+                            {
+                              report.reported
+                                .username
+                            }
+                          </p>
+
+                          <p>
+                            Reporter:{" "}
+                            {
+                              report.reporter
+                                .username
+                            }
+                          </p>
+
+                          <p className="mt-1">
+                            <span className="font-bold">
+                              Reason:
+                            </span>{" "}
+                            {report.reason}
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() =>
+                              setExpandedReportId(
+                                expanded
+                                  ? null
+                                  : report.id
+                              )
+                            }
+                            className="border px-3 py-1 rounded"
+                          >
+                            <Eye
+                              size={15}
+                              className="inline mr-1"
+                            />
+                            Snippet
+                          </button>
+
+                          <button
+                            onClick={() =>
+                              markReviewed(
+                                report.id
+                              )
+                            }
+                            className="bg-green-600 text-white px-3 py-1 rounded"
+                          >
+                            <CheckCircle
+                              size={15}
+                              className="inline mr-1"
+                            />
+                            Reviewed
+                          </button>
+
+                          <button
+                            onClick={() =>
+                              moderateUser(
+                                report.reported
+                                  .id,
+                                "warn",
+                                report.reason
+                              )
+                            }
+                            className="bg-yellow-500 text-white px-3 py-1 rounded"
+                          >
+                            <Megaphone
+                              size={15}
+                              className="inline mr-1"
+                            />
+                            Warn
+                          </button>
+
+                          <button
+                            onClick={() =>
+                              moderateUser(
+                                report.reported
+                                  .id,
+                                "ban",
+                                report.reason
+                              )
+                            }
+                            className="bg-red-600 text-white px-3 py-1 rounded"
+                          >
+                            <Ban
+                              size={15}
+                              className="inline mr-1"
+                            />
+                            Ban
+                          </button>
+                        </div>
+                      </div>
+
+                      {expanded && (
+                        <div className="mt-3 bg-white border rounded p-3">
+                          <p className="font-bold mb-2">
+                            Chat Snippet
+                          </p>
+
+                          {report.snippet.map(
+                            (
+                              msg,
+                              index
+                            ) => (
+                              <p
+                                key={index}
+                              >
+                                <span className="font-bold">
+                                  {
+                                    msg.from
+                                      .username
+                                  }
+                                  :
+                                </span>{" "}
+                                {msg.text}
+                              </p>
+                            )
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+        <div className="fixed right-4 top-4 space-y-2 z-50">
+          {notifications.map(
+            (notification) => (
+              <div
+                key={notification.id}
+                className="bg-white border rounded shadow-lg px-4 py-3 min-w-[280px]"
+              >
+                <div className="flex justify-between gap-3">
+                  <div>
+                    <p className="font-bold text-sm flex items-center gap-2">
+                      <Bell size={15} />
+                      {notification.message}
+                    </p>
+                  </div>
+
+                  <button
+                    onClick={() =>
+                      removeNotification(
+                        notification.id
+                      )
+                    }
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+              </div>
+            )
+          )}
+        </div>
       </div>
     </main>
-  );
-}
-
-function NotificationStack({
-  notifications,
-  onClose,
-}: {
-  notifications: Notification[];
-  onClose: (id: string) => void;
-}) {
-  return (
-    <div className="fixed right-4 top-4 z-50 space-y-2">
-      {notifications.map((notification) => (
-        <div
-          key={notification.id}
-          className={`min-w-[280px] rounded border px-4 py-3 shadow-lg ${
-            notification.type === "success"
-              ? "border-green-300 bg-green-50"
-              : notification.type === "warning"
-              ? "border-yellow-300 bg-yellow-50"
-              : notification.type === "error"
-              ? "border-red-300 bg-red-50"
-              : "border-gray-300 bg-white"
-          }`}
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="flex items-center gap-2 text-sm font-bold">
-                <Bell size={15} />
-                {notification.message}
-              </p>
-
-              <p className="mt-1 text-xs text-gray-500">
-                {new Date(notification.createdAt).toLocaleTimeString()}
-              </p>
-            </div>
-
-            <button
-              onClick={() => onClose(notification.id)}
-              className="text-gray-500 hover:text-black"
-            >
-              <X size={15} />
-            </button>
-          </div>
-        </div>
-      ))}
-    </div>
   );
 }
