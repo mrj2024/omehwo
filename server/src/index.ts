@@ -3,7 +3,7 @@ import http from "http";
 import cors from "cors";
 import { Server, Socket } from "socket.io";
 
-const CLIENT_URL = "http://localhost:5173";
+const CLIENT_URL = "https://omehwo.vercel.app/";
 const PORT = Number(process.env.PORT) || 3001;
 
 type SearchMode = "chat" | "video";
