@@ -218,37 +218,55 @@ export default function App() {
   }, [messages, strangerTyping]);
 
   async function loadProfile(userId: string) {
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("id, username, role, banned")
-      .eq("id", userId)
-      .single();
+  console.log("LOADING PROFILE:", userId);
 
-    if (error || !data) {
-      addLocalNotification("error", "Could not load profile.");
-      return;
-    }
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, username, role, banned")
+    .eq("id", userId)
+    .single();
 
-    if (data.banned) {
-      await supabase.auth.signOut();
-      addLocalNotification("error", "This account is banned.");
-      return;
-    }
+  console.log("PROFILE DATA:", data);
+  console.log("PROFILE ERROR:", error);
 
-    const profile: PublicUser = {
-      id: data.id,
-      username: data.username,
-      role: data.role,
-    };
+  if (error || !data) {
+    addLocalNotification(
+      "error",
+      error?.message || "Could not load profile."
+    );
 
-    setCurrentUser(profile);
-
-    socket.emit("supabase-login", profile);
-
-    if (profile.role === "moderator") {
-      loadReports();
-    }
+    return;
   }
+
+  if (data.banned) {
+    await supabase.auth.signOut();
+
+    addLocalNotification(
+      "error",
+      "This account is banned."
+    );
+
+    return;
+  }
+
+  const profile: PublicUser = {
+    id: data.id,
+    username: data.username,
+    role: data.role,
+  };
+
+  console.log("SETTING USER:", profile);
+
+  setCurrentUser(profile);
+
+  console.log("EMITTING SOCKET LOGIN");
+
+  socket.emit("supabase-login", profile);
+
+  if (profile.role === "moderator") {
+    loadReports();
+  }
+}
 
   async function handleAuth() {
     if (authMode === "register") {
