@@ -1,12 +1,16 @@
 import "dotenv/config";
 import express from "express";
 import http from "http";
+import { AccessToken } from "livekit-server-sdk";
 import cors from "cors";
 import { Server, Socket } from "socket.io";
 import { supabaseAdmin } from "./supabase";
 
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 const PORT = Number(process.env.PORT) || 3001;
+
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
 
 type SearchMode = "chat" | "video";
 type Role = "user" | "moderator";
@@ -110,6 +114,30 @@ function parseFindMatchPayload(payload: FindMatchPayload): {
 
 function getChatKey(a: string, b: string) {
   return [a, b].sort().join(":");
+}
+
+function getLiveKitRoomName(a: string, b: string) {
+  return `omehwo-${getChatKey(a, b).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
+async function createLiveKitToken(roomName: string, user: PublicUser) {
+  if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
+    throw new Error("Missing LiveKit environment variables.");
+  }
+
+  const token = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
+    identity: user.id,
+    name: user.username,
+  });
+
+  token.addGrant({
+    room: roomName,
+    roomJoin: true,
+    canPublish: true,
+    canSubscribe: true,
+  });
+
+  return await token.toJwt();
 }
 
 function pushNotification(socketId: string, notification: Notification) {
@@ -346,18 +374,38 @@ io.on("connection", (socket: Socket) => {
         match.interests.includes(interest)
       );
 
+      let livekitRoom: string | null = null;
+      let socketLivekitToken: string | null = null;
+      let partnerLivekitToken: string | null = null;
+
+      if (mode === "video") {
+        livekitRoom = getLiveKitRoomName(socket.id, partnerId);
+
+        socketLivekitToken = await createLiveKitToken(
+          livekitRoom,
+          getPublicUser(socket.id)
+        );
+
+        partnerLivekitToken = await createLiveKitToken(
+          livekitRoom,
+          getPublicUser(partnerId)
+        );
+      }
+
       socket.emit("match-found", {
         mode,
         stranger: getPublicUser(partnerId),
         interests: sharedInterests,
-        initiator: true,
+        livekitRoom,
+        livekitToken: socketLivekitToken,
       });
 
       io.to(partnerId).emit("match-found", {
         mode,
         stranger: getPublicUser(socket.id),
         interests: sharedInterests,
-        initiator: false,
+        livekitRoom,
+        livekitToken: partnerLivekitToken,
       });
 
       return;
@@ -409,27 +457,6 @@ io.on("connection", (socket: Socket) => {
     io.to(partnerId).emit("stranger-typing");
   });
 
-  socket.on("webrtc-offer", (offer) => {
-    const partnerId = partners.get(socket.id);
-    if (!partnerId) return;
-
-    io.to(partnerId).emit("webrtc-offer", offer);
-  });
-
-  socket.on("webrtc-answer", (answer) => {
-    const partnerId = partners.get(socket.id);
-    if (!partnerId) return;
-
-    io.to(partnerId).emit("webrtc-answer", answer);
-  });
-
-  socket.on("webrtc-ice-candidate", (candidate) => {
-    const partnerId = partners.get(socket.id);
-    if (!partnerId) return;
-
-    io.to(partnerId).emit("webrtc-ice-candidate", candidate);
-  });
-
   socket.on("submit-report", async (reason: string, callback) => {
     const partnerId = partners.get(socket.id);
 
@@ -440,7 +467,8 @@ io.on("connection", (socket: Socket) => {
 
     const reporter = getPublicUser(socket.id);
     const reported = getPublicUser(partnerId);
-    const snippet = chatLogs.get(getChatKey(socket.id, partnerId))?.slice(-10) || [];
+    const snippet =
+      chatLogs.get(getChatKey(socket.id, partnerId))?.slice(-10) || [];
 
     const { error } = await supabaseAdmin.from("reports").insert({
       reporter_id: reporter.id,
