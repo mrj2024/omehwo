@@ -112,14 +112,19 @@ function disconnectPair(socketId: string) {
   }
 }
 
-async function getProfile(userId: string): Promise<(PublicUser & { banned: boolean }) | null> {
+async function getProfile(
+  userId: string
+): Promise<(PublicUser & { banned: boolean }) | null> {
   const { data, error } = await supabaseAdmin
     .from("profiles")
     .select("id, username, role, banned")
     .eq("id", userId)
     .single();
 
-  if (error || !data) return null;
+  if (error || !data) {
+    console.log("GET PROFILE ERROR:", error);
+    return null;
+  }
 
   return {
     id: data.id,
@@ -145,7 +150,10 @@ async function getReports(): Promise<Report[]> {
     )
     .order("created_at", { ascending: false });
 
-  if (error || !data) return [];
+  if (error || !data) {
+    console.log("GET REPORTS ERROR:", error);
+    return [];
+  }
 
   return data.map((report: any) => ({
     id: report.id,
@@ -171,7 +179,11 @@ io.on("connection", (socket: Socket) => {
   emitOnlineCount();
 
   socket.on("supabase-login", async (profile: PublicUser) => {
+    console.log("SUPABASE LOGIN EVENT:", profile);
+
     const dbProfile = await getProfile(profile.id);
+
+    console.log("DB PROFILE:", dbProfile);
 
     if (!dbProfile) {
       pushNotification(socket.id, {
@@ -193,6 +205,8 @@ io.on("connection", (socket: Socket) => {
       username: dbProfile.username,
       role: dbProfile.role,
     });
+
+    console.log("USER STORED IN SOCKET MAP");
 
     pushNotification(socket.id, {
       id: crypto.randomUUID(),
@@ -236,8 +250,7 @@ io.on("connection", (socket: Socket) => {
       partners.set(socket.id, partnerId);
       partners.set(partnerId, socket.id);
 
-      const key = getChatKey(socket.id, partnerId);
-      chatLogs.set(key, []);
+      chatLogs.set(getChatKey(socket.id, partnerId), []);
 
       socket.emit("match-found", {
         mode,
@@ -299,9 +312,7 @@ io.on("connection", (socket: Socket) => {
 
     const reporter = getPublicUser(socket.id);
     const reported = getPublicUser(partnerId);
-
-    const key = getChatKey(socket.id, partnerId);
-    const snippet = chatLogs.get(key)?.slice(-10) || [];
+    const snippet = chatLogs.get(getChatKey(socket.id, partnerId))?.slice(-10) || [];
 
     const { error } = await supabaseAdmin.from("reports").insert({
       reporter_id: reporter.id,
@@ -332,9 +343,7 @@ io.on("connection", (socket: Socket) => {
       return;
     }
 
-    const reports = await getReports();
-
-    callback({ success: true, reports });
+    callback({ success: true, reports: await getReports() });
   });
 
   socket.on("mark-report-reviewed", async (reportId: string, callback) => {
@@ -355,9 +364,7 @@ io.on("connection", (socket: Socket) => {
       return;
     }
 
-    const reports = await getReports();
-
-    io.emit("reports-updated", reports);
+    io.emit("reports-updated", await getReports());
     callback({ success: true });
   });
 
@@ -454,9 +461,9 @@ io.on("connection", (socket: Socket) => {
       }
 
       notifyMods(
-        `${moderator.username} ${
-          data.action === "ban" ? "banned" : "warned"
-        } ${targetProfile.username}`
+        `${moderator.username} ${data.action === "ban" ? "banned" : "warned"} ${
+          targetProfile.username
+        }`
       );
 
       callback({ success: true });
