@@ -473,21 +473,27 @@ export default function App() {
             </div>
 
             <div className="mt-5 space-y-3">
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="Email"
-                className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
-              />
+<input
+  name="email"
+  id="email"
+  type="email"
+  autoComplete="email"
+  value={email}
+  onChange={(e) => setEmail(e.target.value)}
+  placeholder="Email"
+  className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
+/>
 
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Password"
-                className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
-              />
+<input
+  name="password"
+  id="password"
+  type="password"
+  autoComplete="current-password"
+  value={password}
+  onChange={(e) => setPassword(e.target.value)}
+  placeholder="Password"
+  className="w-full border border-gray-400 px-3 py-2 outline-none focus:border-blue-500"
+/>
 
               <button
                 onClick={handleAuth}
